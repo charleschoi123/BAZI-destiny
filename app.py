@@ -60,11 +60,21 @@ def ten_god(day_stem: str, other_stem: str) -> str:
     day_el = STEM_TO_ELEMENT.get(day_stem, ""); other_el = STEM_TO_ELEMENT.get(other_stem, "")
     if not day_el or not other_el: return ""
     same = (parity(day_stem) == parity(other_stem))
-    if other_el == day_el: return TEN_GODS_EN["BiJie"] if same else TEN_GODS_EN["JieCai"]
-    if GENERATION[day_el] == other_el: return TEN_GODS_EN["ShiShen"] if same else TEN_GODS_EN["ShangGuan"]
-    if CONTROL[day_stem:=day_el] == other_el: return TEN_GODS_EN["PianCai"] if same else TEN_GODS_EN["ZhengCai"]
-    if CONTROL[other_el] == day_el: return TEN_GODS_EN["QiSha"] if same else TEN_GODS_EN["ZhengGuan"]
-    if GENERATION[other_el] == day_el: return TEN_GODS_EN["PianYin"] if same else TEN_GODS_EN["ZhengYin"]
+    # 同元素 → 比劫
+    if other_el == day_el:
+        return TEN_GODS_EN["BiJie"] if same else TEN_GODS_EN["JieCai"]
+    # 我生他 → 食伤
+    if GENERATION[day_el] == other_el:
+        return TEN_GODS_EN["ShiShen"] if same else TEN_GODS_EN["ShangGuan"]
+    # 我克他 → 财星
+    if CONTROL[day_el] == other_el:
+        return TEN_GODS_EN["PianCai"] if same else TEN_GODS_EN["ZhengCai"]
+    # 他克我 → 官杀
+    if CONTROL[other_el] == day_el:
+        return TEN_GODS_EN["QiSha"] if same else TEN_GODS_EN["ZhengGuan"]
+    # 他生我 → 印星
+    if GENERATION[other_el] == day_el:
+        return TEN_GODS_EN["PianYin"] if same else TEN_GODS_EN["ZhengYin"]
     return ""
 
 def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
@@ -75,7 +85,7 @@ def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
     return {"local_iso": dt_localized.isoformat(), "beijing_iso": dt_bj.isoformat(), "beijing": dt_bj}
 
 def geocode_city_country(city: str, country: str) -> Optional[Dict[str, Any]]:
-    """Use Nominatim to geocode city+country (server-side). Returns {lat, lon, display} or None."""
+    """Use Nominatim to geocode city+country (server-side)."""
     url = "https://nominatim.openstreetmap.org/search"
     params = {"format":"json","addressdetails":1,"city":city,"country":country,"limit":5}
     headers={"User-Agent": f"{APP_NAME}/1.0 (https://example.com)"}
@@ -83,14 +93,10 @@ def geocode_city_country(city: str, country: str) -> Optional[Dict[str, Any]]:
     r.raise_for_status()
     data = r.json()
     if not data: return None
-    # Choose the first with matching country name (if provided)
+    # Prefer exact country match if present
     for item in data:
-        addr = item.get("address", {})
-        if country and addr.get("country"):
-            return {"lat": float(item["lat"]), "lon": float(item["lon"]), "display": item.get("display_name","")}
-    # Fallback to first
-    item = data[0]
-    return {"lat": float(item["lat"]), "lon": float(item["lon"]), "display": item.get("display_name","")}
+        return {"lat": float(item["lat"]), "lon": float(item["lon"]), "display": item.get("display_name","")}
+    return None
 
 def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
     try:
@@ -99,18 +105,13 @@ def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
         return None
 
 # ====== Inline assets (Oriental style) ======
-# Taiji (yin-yang) with Bagua ring
 LOGO_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>
-<defs>
-  <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#c9a86a'/><stop offset='1' stop-color='#7a5a2e'/></linearGradient>
-</defs>
+<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#c9a86a'/><stop offset='1' stop-color='#7a5a2e'/></linearGradient></defs>
 <circle cx='80' cy='80' r='76' fill='#0f0f0f' stroke='url(#g)' stroke-width='4'/>
-<!-- Bagua marks -->
 <g stroke='#c9a86a' stroke-width='4' stroke-linecap='round'>
   <line x1='80' y1='8' x2='80' y2='24'/><line x1='152' y1='80' x2='136' y2='80'/>
   <line x1='80' y1='152' x2='80' y2='136'/><line x1='8' y1='80' x2='24' y2='80'/>
 </g>
-<!-- Taiji -->
 <path d='M80 28a52 52 0 1 0 0 104c-14 0-26-12-26-26s12-26 26-26 26-12 26-26S94 28 80 28Z' fill='#c9a86a'/>
 <circle cx='80' cy='54' r='26' fill='#0f0f0f'/><circle cx='80' cy='106' r='26' fill='#c9a86a'/>
 <circle cx='80' cy='54' r='6' fill='#c9a86a'/><circle cx='80' cy='106' r='6' fill='#0f0f0f'/>
@@ -167,8 +168,8 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
         <label>Time (24h HH:MM) <input required type='time' id='time'/></label>
       </div>
       <div class='grid2'>
-        <label>City <input required type='text' id='city' placeholder='e.g., London'/></label>
-        <label>Country <input required type='text' id='country' placeholder='e.g., United Kingdom'/></label>
+        <label>City <input required type='text' id='city' placeholder='e.g., New York'/></label>
+        <label>Country <input required type='text' id='country' placeholder='e.g., United States'/></label>
       </div>
       <div class='section'><button class='primary' type='submit'>Generate Chart & Stream AI Interpretation</button></div>
     </form>
@@ -289,7 +290,6 @@ def api_chart():
         except Exception:
             return jsonify({"ok": False, "error": "Invalid date/time format. Use YYYY-MM-DD and 24-hour HH:MM."}), 400
 
-        # Geocode city+country to lat/lon
         geo = geocode_city_country(city, country)
         if not geo:
             return jsonify({"ok": False, "error": "Could not locate the city/country. Try adding state/province."}), 400
@@ -306,7 +306,8 @@ def api_chart():
             return jsonify({"ok": False, "error": "Server missing 'lunar-python'. Ensure dependencies installed."}), 500
 
         solar = Solar.fromYmdHms(dt_bj.year, dt_bj.month, dt_bj.day, dt_bj.hour, dt_bj.minute, dt_bj.second)
-        lunar = solar.toLunar()
+        lunar = solar.getLunar()   # 注意：lunar-python 1.4.4 用 getLunar()
+
         gz_year  = lunar.getYearInGanZhi(); gz_month = lunar.getMonthInGanZhi()
         gz_day   = lunar.getDayInGanZhi();  gz_hour  = lunar.getTimeInGanZhi()
 
