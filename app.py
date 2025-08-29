@@ -60,19 +60,14 @@ def ten_god(day_stem: str, other_stem: str) -> str:
     day_el = STEM_TO_ELEMENT.get(day_stem, ""); other_el = STEM_TO_ELEMENT.get(other_stem, "")
     if not day_el or not other_el: return ""
     same = (parity(day_stem) == parity(other_stem))
-    # 同元素 → 比劫
     if other_el == day_el:
         return TEN_GODS_EN["BiJie"] if same else TEN_GODS_EN["JieCai"]
-    # 我生他 → 食伤
     if GENERATION[day_el] == other_el:
         return TEN_GODS_EN["ShiShen"] if same else TEN_GODS_EN["ShangGuan"]
-    # 我克他 → 财星
     if CONTROL[day_el] == other_el:
         return TEN_GODS_EN["PianCai"] if same else TEN_GODS_EN["ZhengCai"]
-    # 他克我 → 官杀
     if CONTROL[other_el] == day_el:
         return TEN_GODS_EN["QiSha"] if same else TEN_GODS_EN["ZhengGuan"]
-    # 他生我 → 印星
     if GENERATION[other_el] == day_el:
         return TEN_GODS_EN["PianYin"] if same else TEN_GODS_EN["ZhengYin"]
     return ""
@@ -85,7 +80,6 @@ def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
     return {"local_iso": dt_localized.isoformat(), "beijing_iso": dt_bj.isoformat(), "beijing": dt_bj}
 
 def geocode_city_country(city: str, country: str) -> Optional[Dict[str, Any]]:
-    """Use Nominatim to geocode city+country (server-side)."""
     url = "https://nominatim.openstreetmap.org/search"
     params = {"format":"json","addressdetails":1,"city":city,"country":country,"limit":5}
     headers={"User-Agent": f"{APP_NAME}/1.0 (https://example.com)"}
@@ -93,10 +87,8 @@ def geocode_city_country(city: str, country: str) -> Optional[Dict[str, Any]]:
     r.raise_for_status()
     data = r.json()
     if not data: return None
-    # Prefer exact country match if present
-    for item in data:
-        return {"lat": float(item["lat"]), "lon": float(item["lon"]), "display": item.get("display_name","")}
-    return None
+    item = data[0]
+    return {"lat": float(item["lat"]), "lon": float(item["lon"]), "display": item.get("display_name","")}
 
 def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
     try:
@@ -306,7 +298,7 @@ def api_chart():
             return jsonify({"ok": False, "error": "Server missing 'lunar-python'. Ensure dependencies installed."}), 500
 
         solar = Solar.fromYmdHms(dt_bj.year, dt_bj.month, dt_bj.day, dt_bj.hour, dt_bj.minute, dt_bj.second)
-        lunar = solar.getLunar()   # 注意：lunar-python 1.4.4 用 getLunar()
+        lunar = solar.getLunar()   # lunar-python 1.4.4
 
         gz_year  = lunar.getYearInGanZhi(); gz_month = lunar.getMonthInGanZhi()
         gz_day   = lunar.getDayInGanZhi();  gz_hour  = lunar.getTimeInGanZhi()
@@ -347,7 +339,6 @@ def api_chart():
             "ten_gods": ten_gods,
             "five_elements": counts,
             "main_element": main_el,
-            "lucky": {"colors":FIVE_ELEMENTS_COLORS.get(main_el,[]),"numbers":FIVE_ELEMENTS_NUMBERS.get(main_el,[])},
             "luck_cycles": luck
         }), 200
 
@@ -356,14 +347,14 @@ def api_chart():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Server error: {e}"}), 500
 
-# ====== DeepSeek streaming ======
+# ====== DeepSeek streaming (CONSULTATION / ACTION-FOCUSED) ======
 def deepseek_stream(messages: List[Dict[str,str]]):
     if not DEEPSEEK_API_KEY:
         yield "data: " + json.dumps({"delta":"[Missing DEEPSEEK_API_KEY]\n"}) + "\n\n"
         yield "data: [DONE]\n\n"; return
     url = f"{DEEPSEEK_BASE_URL.rstrip('/')}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": 0.7, "stream": True}
+    payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": 0.8, "stream": True}
     with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
         r.raise_for_status()
         for line in r.iter_lines(decode_unicode=True):
@@ -385,25 +376,41 @@ def api_interpret_stream():
     if not chart or not chart.get("ok"):
         return jsonify({"ok": False, "error": "Chart payload missing."}), 400
 
+    # Pull some primitives for the prompt (e.g., zodiac sign from year branch)
+    try:
+        year_branch_cn = (chart.get("pillars", [])[0] or {}).get("branch_cn","")
+    except Exception:
+        year_branch_cn = ""
+
     system_prompt = {
         "role":"system",
         "content":(
-            "You are a Bazi expert who explains Four Pillars for non-Chinese audiences in simple, friendly English. "
-            "Use short paragraphs with gentle, reflective tone from ancient Eastern philosophy. "
-            "Avoid fatalistic claims; emphasize personal agency and balance."
+            "You are an experienced Bazi (Four Pillars) master. "
+            "Provide a consultation-style reading with **practical, detailed, and actionable** advice. "
+            "Go beyond philosophy. Use clear bullets and short paragraphs where helpful. "
+            "Cover: \n"
+            "1) Marriage & Zodiac Compatibility: suitable and unsuitable Chinese zodiac matches (based on the Year Branch), and why; possible dynamics.\n"
+            "2) Career & Wealth: concrete industries/roles that fit; timing for pivots or investments.\n"
+            "3) Luck Cycles Forecast: for the next 1–5 years and 5–10 years; mention specific years and months if the pattern suggests it; note easier vs. challenging windows.\n"
+            "4) Health & Habits: body systems to watch, lifestyle routines.\n"
+            "5) Remedies & Feng Shui: colors, materials, accessories, directions, numbers, daily practices—tie them to Five Elements.\n"
+            "6) Final Strategy: a prioritized checklist of actions.\n"
+            "Keep tone responsible: this is cultural guidance, not medical/financial advice. Avoid determinism; suggest proactive choices."
         )
     }
+
     user_prompt = {
         "role":"user",
         "content":(
-            f"Person's name: {name or 'N/A'}.\n"
-            "Write sections with these headings: Personality, Career, Relationships, Health, Wealth. "
-            "Explain dominant Five Elements and Ten Gods briefly (plain English definitions). "
-            "If luck cycles exist, summarize the next 3 decades. "
-            "Close with a short reflection: 'there is wonder in all things.'\n\n"
-            "Chart JSON:\n" + json.dumps(chart, ensure_ascii=False)
+            f"Client name: {name or 'N/A'}.\n"
+            f"Year Branch (zodiac hint): {year_branch_cn or 'unknown'}.\n"
+            "Please produce sections in this order and with bold headings: "
+            "Personality Snapshot; Marriage & Compatibility; Career & Wealth; Health; "
+            "Luck Cycles (1–5 years, 5–10 years with months if possible); Remedies & Feng Shui; Final Strategy.\n\n"
+            "Use the following chart JSON as your data source:\n" + json.dumps(chart, ensure_ascii=False)
         )
     }
+
     gen = deepseek_stream([system_prompt, user_prompt])
     return Response(stream_with_context(gen), mimetype="text/event-stream",
                     headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
