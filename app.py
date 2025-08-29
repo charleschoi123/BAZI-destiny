@@ -14,7 +14,6 @@ APP_TAGLINE = "From ancient Eastern philosophy—offering insights into your lif
 DEEPSEEK_BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
 DEEPSEEK_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL    = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-DEEPSEEK_LABEL    = os.getenv("AI_SOURCE_LABEL", "DeepSeek")
 
 # ====== Bazi engine ======
 try:
@@ -60,15 +59,15 @@ def ten_god(day_stem: str, other_stem: str) -> str:
     day_el = STEM_TO_ELEMENT.get(day_stem, ""); other_el = STEM_TO_ELEMENT.get(other_stem, "")
     if not day_el or not other_el: return ""
     same = (parity(day_stem) == parity(other_stem))
-    if other_el == day_el:
+    if other_el == day_el:  # 比劫
         return TEN_GODS_EN["BiJie"] if same else TEN_GODS_EN["JieCai"]
-    if GENERATION[day_el] == other_el:
+    if GENERATION[day_el] == other_el:  # 食伤
         return TEN_GODS_EN["ShiShen"] if same else TEN_GODS_EN["ShangGuan"]
-    if CONTROL[day_el] == other_el:
+    if CONTROL[day_el] == other_el:  # 财
         return TEN_GODS_EN["PianCai"] if same else TEN_GODS_EN["ZhengCai"]
-    if CONTROL[other_el] == day_el:
+    if CONTROL[other_el] == day_el:   # 官杀
         return TEN_GODS_EN["QiSha"] if same else TEN_GODS_EN["ZhengGuan"]
-    if GENERATION[other_el] == day_el:
+    if GENERATION[other_el] == day_el:  # 印
         return TEN_GODS_EN["PianYin"] if same else TEN_GODS_EN["ZhengYin"]
     return ""
 
@@ -82,7 +81,7 @@ def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
 def geocode_city_country(city: str, country: str) -> Optional[Dict[str, Any]]:
     url = "https://nominatim.openstreetmap.org/search"
     params = {"format":"json","addressdetails":1,"city":city,"country":country,"limit":5}
-    headers={"User-Agent": f"{APP_NAME}/1.0 (https://example.com)"}
+    headers={"User-Agent": f"{APP_NAME}/1.0 (contact: site-admin)"}
     r = requests.get(url, params=params, headers=headers, timeout=20)
     r.raise_for_status()
     data = r.json()
@@ -96,7 +95,7 @@ def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
     except Exception:
         return None
 
-# ====== Inline assets (Oriental style) ======
+# ====== Inline assets ======
 LOGO_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>
 <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#c9a86a'/><stop offset='1' stop-color='#7a5a2e'/></linearGradient></defs>
 <circle cx='80' cy='80' r='76' fill='#0f0f0f' stroke='url(#g)' stroke-width='4'/>
@@ -129,7 +128,6 @@ button.primary:hover{filter:brightness(.98)}
 .badge{display:inline-block;padding:.25rem .5rem;border:1px solid #e0d7c5;border-radius:.6rem;background:#f3ead8;margin-right:.3rem}
 .pill{padding:.4rem .6rem;border-radius:.6rem;border:1px solid #ddd;margin:.2rem .3rem;display:inline-block;background:#fff}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-footer{padding:16px;text-align:center;color:#cab991}
 hr.sep{border:none;border-top:1px dashed #d9cdb5;margin:14px 0}
 @media (max-width:740px){.grid2{grid-template-columns:1fr}}
 """
@@ -169,8 +167,6 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
 
   <div id='output' class='card' style='display:none;'></div>
 </main>
-
-<footer><p>Powered by {DEEPSEEK_LABEL}. Cultural guidance only.</p></footer>
 <script src='/app.js'></script>
 </body></html>"""
 
@@ -263,7 +259,7 @@ def appjs(): return Response(APP_JS, mimetype="application/javascript")
 @app.route("/logo.svg")
 def logo(): return Response(LOGO_SVG, mimetype="image/svg+xml")
 
-# ====== Chart endpoint (server geocoding; no map needed) ======
+# ====== Chart endpoint ======
 @app.route("/api/chart", methods=["POST"])
 def api_chart():
     try:
@@ -347,10 +343,10 @@ def api_chart():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Server error: {e}"}), 500
 
-# ====== DeepSeek streaming (CONSULTATION / ACTION-FOCUSED) ======
+# ====== DeepSeek streaming (consultation-focused) ======
 def deepseek_stream(messages: List[Dict[str,str]]):
     if not DEEPSEEK_API_KEY:
-        yield "data: " + json.dumps({"delta":"[Missing DEEPSEEK_API_KEY]\n"}) + "\n\n"
+        yield "data: " + json.dumps({"delta":"[Missing API key]\n"}) + "\n\n"
         yield "data: [DONE]\n\n"; return
     url = f"{DEEPSEEK_BASE_URL.rstrip('/')}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
@@ -358,14 +354,17 @@ def deepseek_stream(messages: List[Dict[str,str]]):
     with requests.post(url, headers=headers, json=payload, stream=True, timeout=300) as r:
         r.raise_for_status()
         for line in r.iter_lines(decode_unicode=True):
-            if not line: continue
+            if not line: 
+                continue
             if line.startswith("data: "):
                 data = line[len("data: "):]
-                if data == "[DONE]": yield "data: [DONE]\n\n"; break
+                if data == "[DONE]":
+                    yield "data: [DONE]\n\n"; break
                 try:
                     obj = json.loads(data)
                     delta = obj.get("choices",[{}])[0].get("delta",{}).get("content","")
-                    if delta: yield "data: " + json.dumps({"delta": delta}) + "\n\n"
+                    if delta:
+                        yield "data: " + json.dumps({"delta": delta}) + "\n\n"
                 except Exception:
                     yield "data: " + json.dumps({"text": data}) + "\n\n"
 
@@ -376,7 +375,6 @@ def api_interpret_stream():
     if not chart or not chart.get("ok"):
         return jsonify({"ok": False, "error": "Chart payload missing."}), 400
 
-    # Pull some primitives for the prompt (e.g., zodiac sign from year branch)
     try:
         year_branch_cn = (chart.get("pillars", [])[0] or {}).get("branch_cn","")
     except Exception:
@@ -386,34 +384,36 @@ def api_interpret_stream():
         "role":"system",
         "content":(
             "You are an experienced Bazi (Four Pillars) master. "
-            "Provide a consultation-style reading with **practical, detailed, and actionable** advice. "
-            "Go beyond philosophy. Use clear bullets and short paragraphs where helpful. "
-            "Cover: \n"
-            "1) Marriage & Zodiac Compatibility: suitable and unsuitable Chinese zodiac matches (based on the Year Branch), and why; possible dynamics.\n"
-            "2) Career & Wealth: concrete industries/roles that fit; timing for pivots or investments.\n"
-            "3) Luck Cycles Forecast: for the next 1–5 years and 5–10 years; mention specific years and months if the pattern suggests it; note easier vs. challenging windows.\n"
-            "4) Health & Habits: body systems to watch, lifestyle routines.\n"
-            "5) Remedies & Feng Shui: colors, materials, accessories, directions, numbers, daily practices—tie them to Five Elements.\n"
-            "6) Final Strategy: a prioritized checklist of actions.\n"
-            "Keep tone responsible: this is cultural guidance, not medical/financial advice. Avoid determinism; suggest proactive choices."
+            "Provide consultation-style reading with PRACTICAL, DETAILED, ACTIONABLE advice. "
+            "Cover: 1) Marriage & Zodiac Compatibility; 2) Career & Wealth (industries/roles + timing); "
+            "3) Luck Cycles forecast (1–5y, 5–10y with months if possible); 4) Health & Habits; "
+            "5) Remedies & Feng Shui (colors, materials, accessories, directions, numbers, daily practices); "
+            "6) Final Strategy checklist. Avoid determinism; this is cultural guidance, not medical/financial advice."
         )
     }
-
     user_prompt = {
         "role":"user",
         "content":(
             f"Client name: {name or 'N/A'}.\n"
             f"Year Branch (zodiac hint): {year_branch_cn or 'unknown'}.\n"
-            "Please produce sections in this order and with bold headings: "
+            "Output sections in this exact order with bold headings: "
             "Personality Snapshot; Marriage & Compatibility; Career & Wealth; Health; "
-            "Luck Cycles (1–5 years, 5–10 years with months if possible); Remedies & Feng Shui; Final Strategy.\n\n"
-            "Use the following chart JSON as your data source:\n" + json.dumps(chart, ensure_ascii=False)
+            "Luck Cycles (1–5 years, 5–10 years, with specific years/months if indicated); "
+            "Remedies & Feng Shui; Final Strategy.\n\n"
+            "Use this chart JSON:\n" + json.dumps(chart, ensure_ascii=False)
         )
     }
 
     gen = deepseek_stream([system_prompt, user_prompt])
-    return Response(stream_with_context(gen), mimetype="text/event-stream",
-                    headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+    return Response(
+        stream_with_context(gen),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":"no-cache",
+            "Connection":"keep-alive",
+            "X-Accel-Buffering":"no"
+        }
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
