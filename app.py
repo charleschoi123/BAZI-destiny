@@ -9,6 +9,7 @@ import pytz
 APP_NAME    = "BAZI Destiny"
 APP_TAGLINE = "Ancient Eastern wisdom — clear, practical guidance for modern life."
 
+# DeepSeek / OpenAI 兼容
 AI_BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
 AI_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
 AI_MODEL    = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -87,7 +88,7 @@ def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
     dt_bj = dt_localized.astimezone(bj)
     return {"local_iso": dt_localized.isoformat(), "beijing_iso": dt_bj.isoformat(), "beijing": dt_bj}
 
-# ---------- UI assets (Hero + 卡片下拉) ----------
+# ---------- UI 资源 ----------
 LOGO_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>
 <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#ffb25e'/><stop offset='1' stop-color='#ff5e5e'/></linearGradient></defs>
 <circle cx='80' cy='80' r='76' fill='#0c0c0e' stroke='url(#g)' stroke-width='4'/>
@@ -152,6 +153,7 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
 <meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/>
 <title>{APP_NAME} — Four Pillars (English)</title>
 <link rel='stylesheet' href='/styles.css'/>
+<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
 </head><body>
 
 <header class="hero">
@@ -166,11 +168,11 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
     <div class="hero-main">
       <div>
         <h2>Discover Your <span style="background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent">Destiny</span></h2>
-        <p>Unlock the ancient wisdom of Chinese astrology with modern AI analysis. Explore your Four Pillars and gain practical insights.</p>
+        <p>Unlock the ancient wisdom of Chinese astrology with modern analysis. Explore your Four Pillars and gain practical insights.</p>
         <div class="tagline">
           <span class="badge">English-only, culture friendly</span>
           <span class="badge">Auto time-zone to Beijing</span>
-          <span class="badge">Streaming AI reading</span>
+          <span class="badge">Personalized reading</span>
         </div>
       </div>
       <div class="card" style="backdrop-filter:blur(6px); background:#ffffff10; border-color:#ffffff33; color:#fff">
@@ -202,9 +204,7 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
 </header>
 
 <main class="main">
-  <div class="container" id="results">
-    <!-- 结果卡片将插入到这里 -->
-  </div>
+  <div class="container" id="results"></div>
 </main>
 
 <footer>© BAZI Destiny — cultural guidance only.</footer>
@@ -213,7 +213,7 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
 </body></html>"""
 
 APP_JS = r"""
-// 工具：mini-markdown（**bold**, ## headings, - lists）
+// ===== 工具 =====
 function mdToHtml(md){
   if(!md) return '';
   let html = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -230,9 +230,12 @@ function pctBar(label,val,sum){
   return `<div style="margin:6px 0"><div class="row" style="justify-content:space-between"><div>${label}</div><div>${val||0}</div></div>
   <div class="bar"><i style="width:${pct}%"></i></div></div>`;
 }
+// 全局 AI 状态
+window.aiState = { raw:'', done:false };
 
 const ICON = {
-  tz:'🕰️', pillars:'🧱', gods:'🔰', elements:'🧪', luck:'⏳', love:'💞', ai:'✨'
+  tz:'🕰️', pillars:'🧱', gods:'🔰', elements:'🧪', luck:'⏳', love:'💞', ai:'✨',
+  career:'💼', health:'🩺', wealth:'💰', remedy:'🧿', action:'✅'
 };
 
 function card(title, sub, body, icon){
@@ -263,7 +266,7 @@ function renderAll(data){
       <div><div class="sub">Local time</div><div class="pill">${data.input.local_iso}</div></div>
       <div><div class="sub">Beijing time (UTC+8)</div><div class="pill">${data.input.beijing_iso}</div></div>
     </div>`;
-  const pillars = p.map(x=>`<div class="pill"><b>${x.pillar}</b> ${x.gz} — ${x.stem_el}/${x.branch_el}</div>`).join(' ');
+  const pillars = p.map(x=>`<span class="pill"><b>${x.pillar}</b> ${x.gz} — ${x.stem_el}/${x.branch_el}</span>`).join(' ');
   const tg = data.ten_gods||{};
   const tgBlock = `
     <div class="kpi">
@@ -288,13 +291,22 @@ function renderAll(data){
     card('Five Elements Distribution','Counts from pillars (stem + branch)', feBlock, ICON.elements) +
     card('10-Year Luck Cycles (DaYun)','First few decades', `<div class="kpi">${luckBlock||'—'}</div>`, ICON.luck) +
     card('Marriage & Zodiac Matching','Based on Year Branch', `<div class="kpi"><span class="pill"><b>Year Branch</b> ${yearBranch||'—'}</span></div>`, ICON.love) +
-    card('AI Consultation (Streaming)','Live assistant will fill content below…', `<div id="aiBox" class="markdown"></div><div id="aiCtl" class="row"></div>`, ICON.ai);
+    // “AI 输出暂存卡”，结束后会拆分成多卡
+    card('Your Personalized BaZi Reading','', `<div id="aiBox" class="markdown"></div><div id="aiCtl" class="row"></div>`, ICON.ai);
 }
 
-// --- 交互 ---
+// ===== 事件绑定 =====
 document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('baziForm').addEventListener('submit', onSubmit);
-  document.getElementById('exportPDF').onclick = ()=>window.print();
+  document.getElementById('exportPDF').onclick = ()=>{
+    const area = document.getElementById('results');
+    const opt = {
+      margin:[10,10,10,10], filename:'bazi-destiny.pdf',
+      image:{type:'jpeg',quality:0.98}, html2canvas:{scale:2,useCORS:true},
+      jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}
+    };
+    html2pdf().from(area).set(opt).save();
+  };
 });
 
 async function onSubmit(ev){
@@ -320,49 +332,156 @@ async function onSubmit(ev){
   }
 }
 
+// ===== AI 流式 & H3 分卡 =====
+function tidyEnding(text){
+  if(!text) return text;
+  return text.replace(/\n+Would you like to explore any area in more depth\?\s*$/i,'')
+             .replace(/\n+Would you like to (?:dive|go) deeper.*?\?\s*$/i,'')
+             .replace(/\n+Let me know if you want.*?\.\s*$/i,'');
+}
+
+// 把 H3 标题分段 => {title, html}
+function splitByH3(html){
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  const nodes = Array.from(tmp.childNodes);
+  const sections = [];
+  let cur = {title:'Overview', parts:[]};
+  nodes.forEach(n=>{
+    if(n.tagName && n.tagName.toLowerCase()==='h3'){
+      if(cur.parts.length) sections.push(cur);
+      cur = {title: n.textContent.trim(), parts:[]};
+    }else{
+      cur.parts.push(n.outerHTML || n.textContent);
+    }
+  });
+  if(cur.parts.length) sections.push(cur);
+  return sections.map(s=>({title:s.title, html:s.parts.join('')}));
+}
+
+// 归一化标题，用于给卡片挑选图标/顺序
+function normalizeTitle(t){
+  const x = t.toLowerCase();
+  if(/marriage|relationship|partner|compat/i.test(x)) return {key:'marriage', icon:'💞', title:'Marriage & Compatibility'};
+  if(/career|work|profession/i.test(x)) return {key:'career', icon:'💼', title:'Career'};
+  if(/health|well[- ]?being|diet|exercise/i.test(x)) return {key:'health', icon:'🩺', title:'Health'};
+  if(/wealth|money|finance|investment|property/i.test(x)) return {key:'wealth', icon:'💰', title:'Wealth'};
+  if(/remed|feng\s*shui|color|habit|direction/i.test(x)) return {key:'remedy', icon:'🧿', title:'Remedies & Feng Shui'};
+  if(/action|checklist|plan|priority/i.test(x)) return {key:'action', icon:'✅', title:'Prioritized Action Checklist'};
+  if(/luck|cycle|forecast|year|month/i.test(x)) return {key:'forecast', icon:'⏳', title:'Luck & Forecast'};
+  return {key:'other', icon:'✨', title:t};
+}
+
+function renderAICardsFromRaw(raw){
+  const container = document.getElementById('results');
+  // 先把原 AI 占位卡删掉
+  const aiCard = document.getElementById('aiBox')?.closest('.card');
+  if(aiCard) aiCard.remove();
+
+  const html = mdToHtml(raw);
+  const secs = splitByH3(html);
+  if(!secs.length){
+    // 没有 H3，就整段显示为一张卡
+    container.insertAdjacentHTML('beforeend', card('Your Personalized BaZi Reading','', html, '✨'));
+    return;
+  }
+
+  // 映射 -> 规范标题 + 图标
+  const normalized = secs.map(s=>{
+    const m = normalizeTitle(s.title || 'Section');
+    return {...m, html:s.html};
+  });
+
+  // 期望顺序
+  const order = ['marriage','career','health','wealth','remedy','action','forecast','other'];
+  normalized.sort((a,b)=>order.indexOf(a.key)-order.indexOf(b.key));
+
+  // 依次插卡
+  normalized.forEach(sec=>{
+    container.insertAdjacentHTML('beforeend',
+      card(sec.title,'', sec.html, sec.icon));
+  });
+}
+
 async function streamAI(chart, name, continue_text, tried){
   const box = document.getElementById('aiBox');
   const ctl = document.getElementById('aiCtl');
-  ctl.innerHTML='';
 
-  const body = {chart, name}; if(continue_text) body.continue_text = continue_text;
+  if(continue_text){
+    window.aiState.raw = continue_text;
+  }else{
+    window.aiState = { raw:'', done:false };
+    box.innerHTML = '';
+  }
+  ctl.innerHTML = '';
 
-  const res = await fetch('/api/interpret_stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(!res.ok){ box.innerHTML += `<p>[server busy] click Continue.</p>`; }
-  const reader = res.body.getReader(); const decoder=new TextDecoder('utf-8'); let buffer=''; let sawDone=false; let raw='';
+  const body = { chart, name };
+  if(continue_text) body.continue_text = continue_text;
+
+  const res = await fetch('/api/interpret_stream', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+
+  if(!res.ok){
+    ctl.innerHTML = '<span class="sub" style="color:#b00020">Server busy — tap Continue.</span>';
+    const btn = document.createElement('button');
+    btn.className = 'primary'; btn.textContent = 'Continue';
+    btn.onclick = ()=>streamAI(chart, name, box.textContent, true);
+    ctl.appendChild(btn);
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let sawDone = false;
+
   while(true){
-    const {value,done} = await reader.read(); if(done) break;
-    buffer += decoder.decode(value,{stream:true});
-    let parts = buffer.split('\n\n'); buffer = parts.pop();
-    for(const chunk of parts){
-      if(!chunk.startsWith('data:')) continue;
-      const data = chunk.replace(/^data:\s*/,'');
-      if(data==='[DONE]'){ sawDone=true; break; }
-      try{
-        const obj = JSON.parse(data);
-        const delta = obj.delta || obj.text || '';
-        raw += delta;
-        box.innerHTML = mdToHtml(raw);
-      }catch{ raw += data; box.innerHTML = mdToHtml(raw); }
+    const {value, done} = await reader.read();
+    if(done) break;
+
+    buffer += decoder.decode(value, {stream:true});
+    let chunks = buffer.split('\n\n');
+    buffer = chunks.pop();
+
+    for(const chunk of chunks){
+      if(chunk.startsWith('data:')){
+        const data = chunk.replace(/^data:\s*/,'');
+        if(data==='[DONE]'){ sawDone=true; break; }
+        try{
+          const obj = JSON.parse(data);
+          const delta = obj.delta || obj.text || '';
+          if(delta){
+            window.aiState.raw += delta;
+            box.innerHTML = mdToHtml(window.aiState.raw); // 流式预览
+          }
+        }catch{
+            window.aiState.raw += data;
+            box.innerHTML = mdToHtml(window.aiState.raw);
+        }
+      }
     }
     if(sawDone) break;
   }
-  if(!sawDone){
-    if(!tried){
-      ctl.innerHTML = '<span class="sub">Connection dropped — resuming…</span>';
-      await streamAI(chart, name, box.textContent, true);
-      return;
-    }
-    ctl.innerHTML = '<button id="resumeBtn" class="primary">Continue</button><span class="sub"> Resume from where it stopped.</span>';
+
+  // 流结束：清理结尾句，并按 H3 拆成多卡
+  window.aiState.raw = tidyEnding(window.aiState.raw);
+  window.aiState.done = true;
+  renderAICardsFromRaw(window.aiState.raw);
+
+  if(!sawDone && !tried){
+    // 极少数情况下断开，这里提供继续写按钮（不清空）
+    const container = document.getElementById('results');
+    container.insertAdjacentHTML('beforeend',
+      card('Continue Reading','','<div class="sub">Connection dropped — you can resume.</div><button id="resumeBtn" class="primary">Continue</button>','✨'));
     document.getElementById('resumeBtn').onclick = async ()=>{
-      ctl.innerHTML = '<span class="sub">Resuming…</span>';
-      await streamAI(chart, name, box.textContent, true);
+      await streamAI(chart, name, (document.getElementById('results').textContent||''), true);
     };
   }
 }
 """
 
-# ============== routes ==============
+# ============== Flask 路由 ==============
 @app.route("/")
 def root_index(): return Response(INDEX_HTML, mimetype="text/html")
 @app.route("/styles.css")
@@ -453,13 +572,13 @@ def api_chart():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Server error: {e}"}), 500
 
+# ====== AI Stream (SSE) ======
 def _reader_thread(q: "queue.Queue[str]", url: str, headers: dict, payload: dict):
     try:
         with requests.post(url, headers=headers, json=payload, stream=True, timeout=600) as r:
             r.raise_for_status()
             for raw in r.iter_lines(decode_unicode=True):
-                if raw:
-                    q.put(raw)
+                if raw: q.put(raw)
             q.put("::DONE::")
     except Exception as e:
         q.put(f"::ERR::{e.__class__.__name__}: {e}")
@@ -492,7 +611,7 @@ def ai_stream(messages: List[Dict[str,str]]):
                 except Exception:
                     yield "data: " + json.dumps({"text": data}) + "\n\n"
         except queue.Empty:
-            idle+=1; yield ": ping\n\n"
+            idle+=1; yield ": ping\n\n"  # keep-alive
             if idle%5==0: yield "data: " + json.dumps({"delta": ""}) + "\n\n"
 
 @app.route("/api/interpret_stream", methods=["POST"])
@@ -524,7 +643,7 @@ def api_interpret_stream():
         user_content = (
             f"Client name: {name or 'N/A'}.\n"
             f"Year Branch (zodiac hint): {year_branch_cn or 'unknown'}.\n"
-            "Use Markdown with **bold** section titles and bullet points.\n\n"
+            "Use Markdown with **bold** section titles and bullet points. Use H3 headings for main sections.\n\n"
             "Chart JSON:\n" + json.dumps(chart, ensure_ascii=False)
         )
     gen = ai_stream([system_prompt, {"role":"user","content": user_content}])
