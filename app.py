@@ -6,16 +6,13 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from timezonefinder import TimezoneFinder
 import pytz
 
-# ===== Branding =====
-APP_NAME   = "BAZI Destiny"
-APP_TAGLINE= "Ancient Eastern wisdom—clear, practical guidance for modern life."
+APP_NAME    = "BAZI Destiny"
+APP_TAGLINE = "Ancient Eastern wisdom — clear, practical guidance for modern life."
 
-# ===== LLM (DeepSeek/OpenAI 兼容) =====
 AI_BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
 AI_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
 AI_MODEL    = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-# ===== Bazi engine =====
 try:
     from lunar_python import Solar
     HAS_LUNAR = True
@@ -26,7 +23,6 @@ app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 tf = TimezoneFinder(in_memory=True)
 
-# ===== Basic tables =====
 STEMS_CN = ["甲","乙","丙","丁","戊","己","庚","辛","壬","癸"]
 STEMS_PY = ["Jia","Yi","Bing","Ding","Wu","Ji","Geng","Xin","Ren","Gui"]
 BRANCHES_CN = ["子","丑","寅","卯","辰","巳","午","未","申","酉","戌","亥"]
@@ -36,8 +32,8 @@ BRANCH_TO_PY = dict(zip(BRANCHES_CN, BRANCHES_PY))
 STEM_TO_ELEMENT = {"甲":"Wood","乙":"Wood","丙":"Fire","丁":"Fire","戊":"Earth","己":"Earth","庚":"Metal","辛":"Metal","壬":"Water","癸":"Water"}
 BRANCH_TO_ELEMENT = {"子":"Water","丑":"Earth","寅":"Wood","卯":"Wood","辰":"Earth","巳":"Fire","午":"Fire","未":"Earth","申":"Metal","酉":"Metal","戌":"Earth","亥":"Water"}
 YANG_STEMS = {"甲","丙","戊","庚","壬"}
-GENERATION = {"Wood":"Fire","Fire":"Earth","Earth":"Metal","Metal":"Water","Water":"Wood"}  # 生
-CONTROL    = {"Wood":"Earth","Earth":"Water","Water":"Fire","Fire":"Metal","Metal":"Wood"}  # 克
+GENERATION = {"Wood":"Fire","Fire":"Earth","Earth":"Metal","Metal":"Water","Water":"Wood"}
+CONTROL    = {"Wood":"Earth","Earth":"Water","Water":"Fire","Fire":"Metal","Metal":"Wood"}
 TEN_GODS_EN = {
     "BiJie":"Peer (Parallel)","JieCai":"Rival (Rob Wealth)",
     "ShiShen":"Talent (Eating God / Output)","ShangGuan":"Performer (Hurting Officer)",
@@ -46,7 +42,6 @@ TEN_GODS_EN = {
     "ZhengYin":"Nurture (Direct Resource)","PianYin":"Inspiration (Indirect Resource)"
 }
 
-# ===== Helpers =====
 def split_ganzhi(gz: str) -> Dict[str,str]:
     return {"stem_cn": gz[0] if gz else "", "branch_cn": gz[1] if gz and len(gz)>1 else ""}
 
@@ -69,23 +64,15 @@ def ten_god(day_stem: str, other_stem: str) -> str:
         return TEN_GODS_EN["PianYin"] if same else TEN_GODS_EN["ZhengYin"]
     return ""
 
-def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
-    tz_local = pytz.timezone(tz_name)
-    dt_localized = tz_local.localize(local_dt, is_dst=None)
-    bj = pytz.timezone("Asia/Shanghai")
-    dt_bj = dt_localized.astimezone(bj)
-    return {"local_iso": dt_localized.isoformat(), "beijing_iso": dt_bj.isoformat(), "beijing": dt_bj}
-
 def geocode_city_country(city: str, country: str) -> Optional[Dict[str, Any]]:
     url = "https://nominatim.openstreetmap.org/search"
     params = {"format":"json","addressdetails":1,"city":city,"country":country,"limit":5}
-    headers={"User-Agent": f"{APP_NAME}/1.0"}
-    r = requests.get(url, params=params, headers=headers, timeout=20)
+    r = requests.get(url, params=params, headers={"User-Agent": f"{APP_NAME}/1.0"}, timeout=20)
     r.raise_for_status()
     data = r.json()
     if not data: return None
     item = data[0]
-    return {"lat": float(item["lat"]), "lon": float(item["lon"]), "display": item.get("display_name","")}
+    return {"lat": float(item["lat"]), "lon": float(item["lon"])}
 
 def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
     try:
@@ -93,93 +80,72 @@ def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
     except Exception:
         return None
 
-# ===== Front-end assets (SVG/CSS/JS) =====
+def to_beijing_from_local(local_dt: datetime, tz_name: str) -> Dict[str, Any]:
+    tz_local = pytz.timezone(tz_name)
+    dt_localized = tz_local.localize(local_dt, is_dst=None)
+    bj = pytz.timezone("Asia/Shanghai")
+    dt_bj = dt_localized.astimezone(bj)
+    return {"local_iso": dt_localized.isoformat(), "beijing_iso": dt_bj.isoformat(), "beijing": dt_bj}
+
+# ---------- UI assets (Hero + 卡片下拉) ----------
 LOGO_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>
-<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#c9a86a'/><stop offset='1' stop-color='#7a5a2e'/></linearGradient></defs>
-<circle cx='80' cy='80' r='76' fill='#0f0f0f' stroke='url(#g)' stroke-width='4'/>
-<g stroke='#c9a86a' stroke-width='4' stroke-linecap='round'>
-  <line x1='80' y1='8' x2='80' y2='24'/><line x1='152' y1='80' x2='136' y2='80'/>
-  <line x1='80' y1='152' x2='80' y2='136'/><line x1='8' y1='80' x2='24' y2='80'/>
-</g>
-<path d='M80 28a52 52 0 1 0 0 104c-14 0-26-12-26-26s12-26 26-26 26-12 26-26S94 28 80 28Z' fill='#c9a86a'/>
-<circle cx='80' cy='54' r='26' fill='#0f0f0f'/><circle cx='80' cy='106' r='26' fill='#c9a86a'/>
-<circle cx='80' cy='54' r='6' fill='#c9a86a'/><circle cx='80' cy='106' r='6' fill='#0f0f0f'/>
+<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#ffb25e'/><stop offset='1' stop-color='#ff5e5e'/></linearGradient></defs>
+<circle cx='80' cy='80' r='76' fill='#0c0c0e' stroke='url(#g)' stroke-width='4'/>
+<path d='M80 28a52 52 0 1 0 0 104c-14 0-26-12-26-26s12-26 26-26 26-12 26-26S94 28 80 28Z' fill='url(#g)'/>
+<circle cx='80' cy='54' r='26' fill='#0c0c0e'/><circle cx='80' cy='106' r='26' fill='url(#g)'/>
+<circle cx='80' cy='54' r='6' fill='url(#g)'/><circle cx='80' cy='106' r='6' fill='#0c0c0e'/>
 </svg>"""
 
 STYLES_CSS = """
-/* Google font（失败也会回退系统字体） */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-
 *{box-sizing:border-box}
-:root{ --bg:#0f0e0b; --paper:#f8f6f1; --ink:#1d1a16; --accent:#c9a86a; --accent2:#7a5a2e }
-.theme-jade   { --accent:#6bb58b; --accent2:#2f6d55 }
-.theme-crimson{ --accent:#d96363; --accent2:#7a2e2e }
-.theme-ink    { --paper:#f9f9f7; --ink:#111; --accent:#444; --accent2:#222 }
+:root{
+  --bg:#0c0c0e; --hero:#141421; --hero2:#281f3a;
+  --paper:#ffffff; --muted:#6b6f76; --ink:#0f1215;
+  --brand:#ff8a3d; --brand2:#ff4d4f; --line:#e8eaee; --shadow:0 10px 30px rgba(14,16,20,.12);
+}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+.container{max-width:1080px;margin:0 auto;padding:0 20px}
+header.hero{
+  background:radial-gradient(1200px 600px at 30% -10%, var(--hero2), transparent 60%),
+             radial-gradient(1200px 600px at 80% -10%, #1e2545, transparent 60%),
+             linear-gradient(180deg, var(--hero), #0c0c0e 70%);
+  color:#fff; padding:60px 0 40px; border-bottom:1px solid #1a1a25;
+}
+.brand{display:flex;align-items:center;gap:14px}
+.logo{width:56px;height:56px}
+.brand h1{margin:0;font-size:24px;letter-spacing:.3px}
+.tag{margin:6px 0 0;opacity:.85}
+.hero-main{display:grid;grid-template-columns:1.2fr .8fr;gap:24px;align-items:end;margin-top:26px}
+.hero h2{font-size:56px;line-height:1.05;margin:10px 0;font-weight:800}
+.hero p{margin:0 0 16px;font-size:18px;opacity:.92}
+.badge{display:inline-block;padding:.35rem .6rem;border:1px solid #ffffff2a;border-radius:999px;backdrop-filter:blur(6px);background:#ffffff14;color:#fff;margin-right:8px}
 
-body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
-header{background:linear-gradient(180deg,#171512,#0f0e0b);border-bottom:1px solid #1c1a17;color:#fff}
-.container{max-width:1040px;margin:0 auto;padding:20px}
-.brand{display:flex;gap:14px;align-items:center}
-.logo{width:60px;height:60px}
-.title{margin:0;font-weight:800;letter-spacing:.4px}
-.tag{margin:.2rem 0 0;color:#e7d7b1}
-
-.card{background:var(--paper);border:1px solid #e7decc;border-radius:18px;padding:24px;margin:18px 0;
-      box-shadow:0 16px 40px rgba(0,0,0,.16)}
-.card h2{margin:.2rem 0 1rem;font-size:1.6rem}
-.card h3{margin:1.2rem 0 .6rem}
-
+.main{padding:26px 0 64px}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:20px;margin:14px 0}
+.card h3{margin:2px 0 10px;font-size:20px}
+.card .sub{color:var(--muted);font-size:14px;margin:-4px 0 10px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-label{display:flex;flex-direction:column;gap:6px;font-weight:600}
-input,select,button{padding:12px;border:1px solid #d3c6ad;border-radius:12px;background:#fbfaf7}
-button.primary{background:var(--accent);color:#221e18;border-color:#b08b4a;cursor:pointer;font-weight:800}
+label{display:flex;flex-direction:column;font-weight:600;color:#2c3137}
+input,select,button{padding:12px;border:1px solid #dfe3e9;border-radius:12px;background:#fff}
+button.primary{background:linear-gradient(90deg,var(--brand),var(--brand2));color:#fff;border:0;font-weight:800;cursor:pointer}
 button.primary:hover{filter:brightness(.98)}
-button.ghost{background:transparent;border:1px dashed #b08b4a;color:#b08b4a}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.kpi{display:flex;gap:10px;flex-wrap:wrap}
+.kpi .pill{padding:.35rem .6rem;border-radius:10px;border:1px solid var(--line);background:#fafbfc}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+hr.sep{border:none;border-top:1px dashed #e6e9ef;margin:14px 0}
 
-.section{margin-top:18px}
-.badge{display:inline-block;padding:.25rem .5rem;border:1px solid #e0d7c5;border-radius:.6rem;background:#f3ead8;margin-right:.3rem}
-.pill{padding:.35rem .6rem;border-radius:.6rem;border:1px solid #ddd;margin:.2rem .3rem;display:inline-block;background:#fff}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-hr.sep{border:none;border-top:1px dashed #d9cdb5;margin:14px 0}
-.no-print{}
+.bar{height:8px;background:#eef1f6;border-radius:6px;overflow:hidden}
+.bar > i{display:block;height:8px;background:linear-gradient(90deg,var(--brand),var(--brand2))}
+.tagline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 
-/* Toolbar */
-.toolbar{display:flex;justify-content:space-between;align-items:center;margin:10px 0;gap:10px}
-.toolbar .left,.toolbar .right{display:flex;align-items:center;gap:8px}
-.dots{display:flex;gap:6px}
-.dot{width:10px;height:10px;border-radius:999px;background:#d1c6ad;opacity:.6;transition:.2s}
-.dot.active{opacity:1;background:var(--accent);box-shadow:0 0 0 2px rgba(0,0,0,.08)}
+.markdown h3{margin:14px 0 6px}
+.markdown p{margin:8px 0}
+.markdown ul{margin:6px 0 6px 18px; padding:0}
+.markdown li{margin:4px 0}
 
-/* Deck & Slides */
-.deck{position:relative;min-height:60vh}
-.slide-page{
-  background:var(--paper); color:var(--ink);
-  border:1px solid #e7decc; border-radius:16px; padding:26px;
-  box-shadow:0 14px 40px rgba(0,0,0,.15);
-  position:absolute; inset:0; overflow:auto;
-  transform-origin:50% 50%; opacity:0; pointer-events:none; transition:.25s;
-}
-.slide-page.active{opacity:1; pointer-events:auto}
-.slide-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
-.slide-head svg{width:26px;height:26px}
-.slide-title{font-size:1.4rem;font-weight:800;margin:0}
-.slide-body{line-height:1.65}
-
-/* Pretty tables/rows */
-.table{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-.cell{border:1px solid #eadfc9;border-radius:10px;padding:8px;background:#fff}
-.cell.good{border-color:#76c29d;background:#f2fbf6}
-.cell.bad{border-color:#e59a9a;background:#fff6f6}
-.timeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
-.ti{background:#fff;border:1px solid #eadfc9;border-radius:10px;padding:8px}
-
-/* Print for A4 */
-@media print{
-  body{background:#fff}
-  header,.toolbar,.no-print{display:none}
-  .deck{min-height:auto}
-  .slide-page{position:static;page-break-after:always;box-shadow:none;border-color:#ddd}
-}
+footer{color:#8b9097;font-size:12px;text-align:center;margin:40px 0 10px}
 """
 
 INDEX_HTML = f"""<!doctype html><html lang='en'><head>
@@ -187,244 +153,216 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
 <title>{APP_NAME} — Four Pillars (English)</title>
 <link rel='stylesheet' href='/styles.css'/>
 </head><body>
-<header><div class='container brand'>
-  <img src='/logo.svg' class='logo' alt='logo'/>
-  <div><h1 class='title'>{APP_NAME}</h1><div class='tag'>{APP_TAGLINE}</div></div>
-</div></header>
 
-<main class='container'>
-  <div class='card'>
-    <h2>Enter Your Birth Details</h2>
-    <p style='margin:.4rem 0 .8rem;color:#5a513f'>We convert your local birth time to Beijing Time (UTC+8) automatically for accurate Bazi calculation.</p>
-    <form id='baziForm' class='no-print'>
-      <div class='grid2'>
-        <label>Name (optional) <input type='text' id='name' placeholder='Your name'/></label>
-        <label>Gender (optional)
-          <select id='gender'><option value=''>Prefer not to say</option><option value='male'>Male</option><option value='female'>Female</option></select>
-        </label>
+<header class="hero">
+  <div class="container">
+    <div class="brand">
+      <img src="/logo.svg" class="logo" alt="logo"/>
+      <div>
+        <h1>BaZi Destiny</h1>
+        <div class="tag">{APP_TAGLINE}</div>
       </div>
-      <div class='grid2'>
-        <label>Date (YYYY-MM-DD) <input required type='date' id='date'/></label>
-        <label>Time (24h HH:MM) <input required type='time' id='time'/></label>
-      </div>
-      <div class='grid2'>
-        <label>City <input required type='text' id='city' placeholder='e.g., Guangzhou'/></label>
-        <label>Country <input required type='text' id='country' placeholder='e.g., China'/></label>
-      </div>
-      <div class='section'><button class='primary' type='submit'>Generate & Stream Interpretation</button></div>
-    </form>
-  </div>
-
-  <div class="toolbar no-print">
-    <div class="left">
-      <button id="prevSlide" class="ghost">◀ Prev</button>
-      <button id="nextSlide" class="ghost">Next ▶</button>
-      <div id="dots" class="dots"></div>
     </div>
-    <div class="right">
-      <select id="themeSel" title="Theme">
-        <option value="classic">Classic</option>
-        <option value="jade">Jade</option>
-        <option value="crimson">Crimson</option>
-        <option value="ink">Ink</option>
-      </select>
-      <button id="exportPDF" class="primary">Export PDF</button>
+    <div class="hero-main">
+      <div>
+        <h2>Discover Your <span style="background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent">Destiny</span></h2>
+        <p>Unlock the ancient wisdom of Chinese astrology with modern AI analysis. Explore your Four Pillars and gain practical insights.</p>
+        <div class="tagline">
+          <span class="badge">English-only, culture friendly</span>
+          <span class="badge">Auto time-zone to Beijing</span>
+          <span class="badge">Streaming AI reading</span>
+        </div>
+      </div>
+      <div class="card" style="backdrop-filter:blur(6px); background:#ffffff10; border-color:#ffffff33; color:#fff">
+        <h3 style="color:#fff;margin-top:0">Quick Start</h3>
+        <div class="sub" style="color:#fff">Enter your birth details</div>
+        <form id="baziForm">
+          <div class="grid2">
+            <label style="color:#fff">Name (optional)<input type="text" id="name" placeholder="Your name"/></label>
+            <label style="color:#fff">Gender (optional)
+              <select id="gender"><option value="">Prefer not to say</option><option value="male">Male</option><option value="female">Female</option></select>
+            </label>
+          </div>
+          <div class="grid2">
+            <label style="color:#fff">Date <input required type="date" id="date"/></label>
+            <label style="color:#fff">Time <input required type="time" id="time"/></label>
+          </div>
+          <div class="grid2">
+            <label style="color:#fff">City <input required type="text" id="city" placeholder="e.g., Guangzhou"/></label>
+            <label style="color:#fff">Country <input required type="text" id="country" placeholder="e.g., China"/></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="primary" type="submit">Generate & Stream Interpretation</button>
+            <button id="exportPDF" type="button" style="border:1px solid #ffffff55;background:transparent;color:#fff;border-radius:12px;padding:12px">Export PDF</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
+</header>
 
-  <div id='deck' class='deck'></div>
+<main class="main">
+  <div class="container" id="results">
+    <!-- 结果卡片将插入到这里 -->
+  </div>
 </main>
 
-<script src='/app.js'></script>
+<footer>© BAZI Destiny — cultural guidance only.</footer>
+
+<script src="/app.js"></script>
 </body></html>"""
 
 APP_JS = r"""
-// ---- Icons (inline SVG) ----
-const ICONS = {
-  chart:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg>`,
-  tz:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/></svg>`,
-  pillars:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 3v18M12 3v18M18 3v18"/></svg>`,
-  gods:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 12h16M12 4v16"/></svg>`,
-  elements:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2l9 7-9 13L3 9z"/></svg>`,
-  dayun:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h18M3 6h12M3 18h8"/></svg>`,
-  love:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 21s-7-4.5-9-9 1-8 5-8 4 3 4 3 1-3 5-3 7 3 5 8-10 9-10 9z"/></svg>`,
-  ai:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>`
+// 工具：mini-markdown（**bold**, ## headings, - lists）
+function mdToHtml(md){
+  if(!md) return '';
+  let html = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  html = html.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  html = html.replace(/^###\s*(.+)$/gm,'<h3>$1</h3>');
+  html = html.replace(/^##\s*(.+)$/gm,'<h3>$1</h3>');
+  html = html.replace(/^- (.+)$/gm,'<li>$1</li>');
+  html = html.replace(/(<li>[\s\S]*?<\/li>)/g,'<ul>$1</ul>');
+  html = html.replace(/\n{2,}/g,'</p><p>');
+  return `<p>${html}</p>`.replace(/<p><\/p>/g,'');
+}
+function pctBar(label,val,sum){
+  const pct = Math.round(100*(val||0)/(sum||1));
+  return `<div style="margin:6px 0"><div class="row" style="justify-content:space-between"><div>${label}</div><div>${val||0}</div></div>
+  <div class="bar"><i style="width:${pct}%"></i></div></div>`;
+}
+
+const ICON = {
+  tz:'🕰️', pillars:'🧱', gods:'🔰', elements:'🧪', luck:'⏳', love:'💞', ai:'✨'
 };
 
-function applyTheme(val){
-  document.documentElement.classList.remove('theme-jade','theme-crimson','theme-ink');
-  if(val==='jade') document.documentElement.classList.add('theme-jade');
-  if(val==='crimson') document.documentElement.classList.add('theme-crimson');
-  if(val==='ink') document.documentElement.classList.add('theme-ink');
+function card(title, sub, body, icon){
+  return `<section class="card">
+    <div class="row" style="justify-content:space-between">
+      <div class="row" style="gap:8px"><div style="font-size:20px">${icon||''}</div><h3>${title}</h3></div>
+    </div>
+    ${sub?`<div class="sub">${sub}</div>`:''}
+    <div>${body||''}</div>
+  </section>`;
 }
 
-function makeSlide({icon,title,html}){
-  return `<section class="slide-page"><div class="slide-head">
-    <div class="icon">${ICONS[icon]||''}</div><h2 class="slide-title">${title}</h2></div>
-    <div class="slide-body">${html}</div></section>`;
-}
-function setActive(idx){
-  const pages=[...document.querySelectorAll('.slide-page')];
-  pages.forEach((p,i)=>p.classList.toggle('active',i===idx));
-  const dots=[...document.querySelectorAll('.dot')];
-  dots.forEach((d,i)=>d.classList.toggle('active',i===idx));
-  window.__slide_idx = idx;
-}
-function buildDots(n){
-  const dots=document.getElementById('dots');
-  dots.innerHTML = Array.from({length:n},(_,i)=>`<div class="dot ${i===0?'active':''}"></div>`).join('');
-  [...dots.children].forEach((d,i)=>d.onclick=()=>setActive(i));
-}
-function nav(delta){
-  const pages=[...document.querySelectorAll('.slide-page')];
-  let i = (window.__slide_idx||0)+delta;
-  if(i<0) i=0; if(i>pages.length-1) i=pages.length-1;
-  setActive(i);
-}
-document.addEventListener('keydown',e=>{
-  if(e.key==='ArrowRight') nav(1);
-  if(e.key==='ArrowLeft')  nav(-1);
-});
+function renderAll(data){
+  const box = document.getElementById('results');
+  const p = data.pillars||[], fe=data.five_elements||{}, luck=data.luck_cycles||[];
+  const totalEl = Object.values(fe).reduce((a,b)=>a+b,0)||1;
 
-function bar(label,val,sum){
-  const pct=Math.round(100*(val||0)/(sum||1));
-  return `<div style="margin:6px 0">${label}: ${val||0}
-    <div style="height:8px;background:#eee;border-radius:6px;overflow:hidden">
-      <div style="width:${pct}%;height:8px;background:var(--accent)"></div></div></div>`;
-}
-
-// 生肖配对卡片（按年支）
-function zodiMatch(year_branch){
-  const map = {
-    "巳":{ best:["酉( Rooster )","丑( Ox )"], work:["辰( Dragon )","申( Monkey )"], hard:["亥( Pig )","寅( Tiger )"] },
-    // 其他生肖可以继续补，这里演示 Snake
-  };
-  const m = map[year_branch] || {best:[],work:[],hard:[]};
-  return `
-    <div class="table">
-      <div class="cell good"><b>Most harmonious</b><div>${m.best.join(", ")||"—"}</div></div>
-      <div class="cell"><b>Can work</b><div>${m.work.join(", ")||"—"}</div></div>
-      <div class="cell bad"><b>Challenging</b><div>${m.hard.join(", ")||"—"}</div></div>
+  const overview = `
+    <div class="kpi">
+      <span class="pill"><b>Name</b> ${data.input.name||'—'}</span>
+      <span class="pill"><b>Gender</b> ${data.input.gender||'—'}</span>
+      <span class="pill"><b>City</b> ${data.input.city||'—'}</span>
+      <span class="pill"><b>Country</b> ${data.input.country||'—'}</span>
+      <span class="pill"><b>Time Zone</b> ${data.input.timezone}</span>
+    </div>
+    <hr class="sep"/>
+    <div class="row" style="gap:20px;flex-wrap:wrap">
+      <div><div class="sub">Local time</div><div class="pill">${data.input.local_iso}</div></div>
+      <div><div class="sub">Beijing time (UTC+8)</div><div class="pill">${data.input.beijing_iso}</div></div>
     </div>`;
-}
-
-function renderSlidesDeck(data){
-  const deck=document.getElementById('deck');
-  const p=data.pillars||[], fe=data.five_elements||{}, luck=data.luck_cycles||[];
-  const head = `
-    <div><strong>Name:</strong> ${data.input.name||'—'} | <strong>Gender:</strong> ${data.input.gender||'—'}</div>
-    <div><strong>City:</strong> ${data.input.city||'—'} | <strong>Country:</strong> ${data.input.country||'—'}</div>`;
-  const tz = `
-    <div>Detected time zone: <span class='badge mono'>${data.input.timezone}</span></div>
-    <div class='mono'>Local birth time: ${data.input.local_iso}</div>
-    <div class='mono'>Beijing time (UTC+8): ${data.input.beijing_iso}</div>`;
-  const pillars = p.map(x=>`<div class='pill'><b>${x.pillar}</b> ${x.gz} — ${x.stem_el}/${x.branch_el}</div>`).join('');
-  const tg=data.ten_gods||{};
+  const pillars = p.map(x=>`<div class="pill"><b>${x.pillar}</b> ${x.gz} — ${x.stem_el}/${x.branch_el}</div>`).join(' ');
+  const tg = data.ten_gods||{};
   const tgBlock = `
-    <div class='badge'>Month: ${tg.MonthStem||'-'}</div>
-    <div class='badge'>Year: ${tg.YearStem||'-'}</div>
-    <div class='badge'>Hour: ${tg.HourStem||'-'}</div>`;
-  const totalEl=Object.values(fe).reduce((a,b)=>a+b,0)||1;
-  const feBlock = `
-    ${bar('Wood',fe.Wood,totalEl)}${bar('Fire',fe.Fire,totalEl)}${bar('Earth',fe.Earth,totalEl)}
-    ${bar('Metal',fe.Metal,totalEl)}${bar('Water',fe.Water,totalEl)}
-    <div class='badge'>Dominant: <strong>${data.main_element||'-'}</strong></div>`;
-  const luckBlock = `
-    <div class="timeline">
-      ${(luck&&luck.length?luck:[{index:1,start_age:'—',gz:'—'},{index:2,start_age:'—',gz:'—'},{index:3,start_age:'—',gz:'—'}])
-        .map(x=>`<div class="ti"><b>Decade #${x.index}</b><div>start age: ${x.start_age}</div><div>pillar: ${x.gz}</div></div>`).join('')}
+    <div class="kpi">
+      <span class="pill">Month: ${tg.MonthStem||'-'}</span>
+      <span class="pill">Year: ${tg.YearStem||'-'}</span>
+      <span class="pill">Hour: ${tg.HourStem||'-'}</span>
     </div>`;
+  const feBlock = `
+    ${pctBar('Wood',fe.Wood,totalEl)}
+    ${pctBar('Fire',fe.Fire,totalEl)}
+    ${pctBar('Earth',fe.Earth,totalEl)}
+    ${pctBar('Metal',fe.Metal,totalEl)}
+    ${pctBar('Water',fe.Water,totalEl)}
+    <div class="row" style="gap:8px;margin-top:6px"><span class="pill"><b>Dominant</b> ${data.main_element||'-'}</span></div>`;
+  const luckBlock = (luck && luck.length?luck:[]).map(x=>`<span class="pill"><b>#${x.index}</b> start age ${x.start_age} — ${x.gz}</span>`).join(' ');
+  const yearBranch = (p.find(x=>x.pillar==='Year')||{}).branch_cn || '';
 
-  // Year Branch for compatibility
-  const yb = (p.find(x=>x.pillar==='Year')||{}).branch_cn || '';
-
-  const slidesHTML = [
-    makeSlide({icon:'chart',   title:'Overview',                   html:head}),
-    makeSlide({icon:'tz',      title:'Time Zone & Conversion',     html:tz}),
-    makeSlide({icon:'pillars', title:'Four Pillars (Ganzhi)',      html:`<div>${pillars}</div>`}),
-    makeSlide({icon:'gods',    title:'Ten Gods (to Day Stem)',     html:tgBlock}),
-    makeSlide({icon:'elements',title:'Five Elements Distribution', html:feBlock}),
-    makeSlide({icon:'dayun',   title:'10-Year Luck Cycles (DaYun)',html:luckBlock}),
-    makeSlide({icon:'love',    title:'Marriage & Zodiac Matching', html:zodiMatch(yb)}),
-    makeSlide({icon:'ai',      title:'AI Consultation (Streaming)',html:`<div id="aiBox" class="mono" style="white-space:pre-wrap"></div><div id="aiCtl" style="margin-top:8px"></div>`}),
-  ].join('');
-
-  deck.innerHTML = slidesHTML;
-  buildDots(deck.querySelectorAll('.slide-page').length);
-  setActive(0);
+  box.innerHTML =
+    card('Overview','Time-zone conversion & inputs', overview, ICON.tz) +
+    card('Four Pillars (GanZhi)','Stem/Branch & elements', `<div class="kpi">${pillars}</div>`, ICON.pillars) +
+    card('Ten Gods (to Day Stem)','Traditional roles in simple English', tgBlock, ICON.gods) +
+    card('Five Elements Distribution','Counts from pillars (stem + branch)', feBlock, ICON.elements) +
+    card('10-Year Luck Cycles (DaYun)','First few decades', `<div class="kpi">${luckBlock||'—'}</div>`, ICON.luck) +
+    card('Marriage & Zodiac Matching','Based on Year Branch', `<div class="kpi"><span class="pill"><b>Year Branch</b> ${yearBranch||'—'}</span></div>`, ICON.love) +
+    card('AI Consultation (Streaming)','Live assistant will fill content below…', `<div id="aiBox" class="markdown"></div><div id="aiCtl" class="row"></div>`, ICON.ai);
 }
 
-// ---- Form & streaming ----
-document.addEventListener('DOMContentLoaded',()=>{
+// --- 交互 ---
+document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('baziForm').addEventListener('submit', onSubmit);
-  document.getElementById('prevSlide').onclick = ()=>nav(-1);
-  document.getElementById('nextSlide').onclick = ()=>nav(1);
-  document.getElementById('themeSel').onchange = (e)=>applyTheme(e.target.value);
   document.getElementById('exportPDF').onclick = ()=>window.print();
 });
 
 async function onSubmit(ev){
   ev.preventDefault();
   const payload={
-    name: document.getElementById('name').value,
-    gender: document.getElementById('gender').value,
-    date: document.getElementById('date').value,
-    time: document.getElementById('time').value,
-    city: document.getElementById('city').value,
-    country: document.getElementById('country').value
+    name:document.getElementById('name').value,
+    gender:document.getElementById('gender').value,
+    date:document.getElementById('date').value,
+    time:document.getElementById('time').value,
+    city:document.getElementById('city').value,
+    country:document.getElementById('country').value
   };
-  const deck=document.getElementById('deck');
-  deck.innerHTML = `<section class="slide-page active"><div class="slide-head"><h2 class="slide-title">Progress</h2></div><div class="slide-body mono">Step 1/2 — Calculating pillars…</div></section>`;
+  const box = document.getElementById('results');
+  box.innerHTML = `<section class="card"><h3>Working…</h3><div class="sub">Step 1/2 — calculating pillars</div></section>`;
   try{
-    const res=await fetch('/api/chart', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-    const data=await res.json();
-    if(!data.ok){ deck.innerHTML = `<section class="slide-page active"><div class="slide-head"><h2 class="slide-title">Error</h2></div><div class="slide-body mono" style="color:#b00020">${data.error||'Unknown'}</div></section>`; return; }
-    renderSlidesDeck(data);
+    const res = await fetch('/api/chart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data = await res.json();
+    if(!data.ok){ box.innerHTML = `<section class="card"><h3>Error</h3><div class="sub" style="color:#b00020">${data.error||'Unknown error'}</div></section>`; return; }
+    renderAll(data);
     await streamAI(data, payload.name);
   }catch(e){
-    deck.innerHTML = `<section class="slide-page active"><div class="slide-head"><h2 class="slide-title">Error</h2></div><div class="slide-body mono" style="color:#b00020">Network/server error.</div></section>`;
+    box.innerHTML = `<section class="card"><h3>Network / server error</h3></section>`;
   }
 }
 
-/** SSE with auto-resume once, then show Continue button */
 async function streamAI(chart, name, continue_text, tried){
-  const box=document.getElementById('aiBox');
-  const ctl=document.getElementById('aiCtl');
+  const box = document.getElementById('aiBox');
+  const ctl = document.getElementById('aiCtl');
   ctl.innerHTML='';
-  let sawDone=false;
 
-  const body={chart, name};
-  if(continue_text){ body.continue_text = continue_text; }
+  const body = {chart, name}; if(continue_text) body.continue_text = continue_text;
 
-  const res=await fetch('/api/interpret_stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  if(!res.ok){ box.textContent+='[server busy] Please click Continue.\n'; }
-  const reader=res.body.getReader(); const decoder=new TextDecoder('utf-8'); let buffer='';
+  const res = await fetch('/api/interpret_stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!res.ok){ box.innerHTML += `<p>[server busy] click Continue.</p>`; }
+  const reader = res.body.getReader(); const decoder=new TextDecoder('utf-8'); let buffer=''; let sawDone=false; let raw='';
   while(true){
-    const {value,done}=await reader.read(); if(done) break;
-    buffer+=decoder.decode(value,{stream:true});
-    let parts=buffer.split('\n\n'); buffer=parts.pop();
+    const {value,done} = await reader.read(); if(done) break;
+    buffer += decoder.decode(value,{stream:true});
+    let parts = buffer.split('\n\n'); buffer = parts.pop();
     for(const chunk of parts){
       if(!chunk.startsWith('data:')) continue;
-      const data=chunk.replace(/^data:\s*/,'');
+      const data = chunk.replace(/^data:\s*/,'');
       if(data==='[DONE]'){ sawDone=true; break; }
-      try{ const obj=JSON.parse(data); const delta=obj.delta||obj.text||''; box.textContent+=delta; }
-      catch{ box.textContent+=data; }
+      try{
+        const obj = JSON.parse(data);
+        const delta = obj.delta || obj.text || '';
+        raw += delta;
+        box.innerHTML = mdToHtml(raw);
+      }catch{ raw += data; box.innerHTML = mdToHtml(raw); }
     }
     if(sawDone) break;
   }
   if(!sawDone){
     if(!tried){
-      ctl.innerHTML='<span class="mono">Connection dropped — resuming…</span>';
+      ctl.innerHTML = '<span class="sub">Connection dropped — resuming…</span>';
       await streamAI(chart, name, box.textContent, true);
       return;
     }
-    ctl.innerHTML = '<button id="resumeBtn" class="primary" style="padding:8px 12px;border-radius:8px;border:1px solid var(--accent2);background:var(--accent);color:#221e18;cursor:pointer">Continue</button> <span class="mono" style="margin-left:8px">Click to resume from where it stopped.</span>';
-    document.getElementById('resumeBtn').onclick = async ()=>{ ctl.innerHTML='<span class="mono">Resuming…</span>'; await streamAI(chart, name, box.textContent, true); };
+    ctl.innerHTML = '<button id="resumeBtn" class="primary">Continue</button><span class="sub"> Resume from where it stopped.</span>';
+    document.getElementById('resumeBtn').onclick = async ()=>{
+      ctl.innerHTML = '<span class="sub">Resuming…</span>';
+      await streamAI(chart, name, box.textContent, true);
+    };
   }
 }
 """
 
-# ===== Routes =====
+# ============== routes ==============
 @app.route("/")
 def root_index(): return Response(INDEX_HTML, mimetype="text/html")
 @app.route("/styles.css")
@@ -436,7 +374,6 @@ def logo(): return Response(LOGO_SVG, mimetype="image/svg+xml")
 @app.route("/favicon.ico")
 def favicon(): return Response(LOGO_SVG, mimetype="image/svg+xml")
 
-# ===== Chart =====
 @app.route("/api/chart", methods=["POST"])
 def api_chart():
     try:
@@ -451,7 +388,7 @@ def api_chart():
         try:
             local_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
         except Exception:
-            return jsonify({"ok": False, "error": "Invalid date/time format. Use YYYY-MM-DD and 24-hour HH:MM."}), 400
+            return jsonify({"ok": False, "error": "Invalid date/time format. Use YYYY-MM-DD and HH:MM (24h)."}), 400
 
         geo = geocode_city_country(city, country)
         if not geo:
@@ -502,8 +439,7 @@ def api_chart():
             "ok": True,
             "input":{
                 "name": name, "gender": gender, "city": city, "country": country,
-                "lat": lat, "lon": lon, "timezone": tz_name,
-                "local_iso": conv["local_iso"], "beijing_iso": conv["beijing_iso"]
+                "timezone": tz_name, "local_iso": conv["local_iso"], "beijing_iso": conv["beijing_iso"]
             },
             "pillars": pillars,
             "ten_gods": ten_gods,
@@ -517,7 +453,6 @@ def api_chart():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Server error: {e}"}), 500
 
-# ===== SSE relay with background thread (prevents gunicorn killing request) =====
 def _reader_thread(q: "queue.Queue[str]", url: str, headers: dict, payload: dict):
     try:
         with requests.post(url, headers=headers, json=payload, stream=True, timeout=600) as r:
@@ -533,42 +468,32 @@ def ai_stream(messages: List[Dict[str,str]]):
     if not AI_API_KEY:
         yield "data: " + json.dumps({"delta":"[Missing API key]\n"}) + "\n\n"
         yield "data: [DONE]\n\n"; return
-
     url = f"{AI_BASE_URL.rstrip('/')}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": AI_MODEL, "messages": messages, "temperature": 0.8, "stream": True}
-
     q: "queue.Queue[str]" = queue.Queue(maxsize=1000)
     t = threading.Thread(target=_reader_thread, args=(q, url, headers, payload), daemon=True)
     t.start()
-
-    # 每 2s 发一次注释 ping，保持连接活跃；同时 gunicorn --timeout 提高到 600
-    idle = 0
+    idle=0
     while True:
         try:
-            item = q.get(timeout=2.0)
-            idle = 0
-            if item == "::DONE::":
-                yield "data: [DONE]\n\n"; break
+            item=q.get(timeout=2.0); idle=0
+            if item=="::DONE::": yield "data: [DONE]\n\n"; break
             if item.startswith("::ERR::"):
                 yield "data: " + json.dumps({"delta": f"\n\n[connection note] {item[7:]}\n"}) + "\n\n"
                 yield "data: [DONE]\n\n"; break
-            # 透传
             if item.startswith("data: "):
-                data = item[6:]
-                if data == "[DONE]":
-                    yield "data: [DONE]\n\n"; break
+                data=item[6:]
+                if data=="[DONE]": yield "data: [DONE]\n\n"; break
                 try:
-                    obj = json.loads(data)
-                    delta = obj.get("choices",[{}])[0].get("delta",{}).get("content","")
+                    obj=json.loads(data)
+                    delta=obj.get("choices",[{}])[0].get("delta",{}).get("content","")
                     if delta: yield "data: " + json.dumps({"delta": delta}) + "\n\n"
                 except Exception:
                     yield "data: " + json.dumps({"text": data}) + "\n\n"
         except queue.Empty:
-            idle += 1
-            yield ": ping\n\n"  # SSE 注释行
-            if idle % 5 == 0:
-                yield "data: " + json.dumps({"delta": ""}) + "\n\n"  # 空 delta，促使 gunicorn flush
+            idle+=1; yield ": ping\n\n"
+            if idle%5==0: yield "data: " + json.dumps({"delta": ""}) + "\n\n"
 
 @app.route("/api/interpret_stream", methods=["POST"])
 def api_interpret_stream():
@@ -593,22 +518,15 @@ def api_interpret_stream():
             "Tone: clear, warm, culturally respectful. This is cultural guidance, not medical or financial advice."
         )
     }
-
     if continue_text:
-        user_content = (
-            "Continue the following consultation exactly where it stopped. "
-            "Do not repeat previous text; keep structure and tone.\n\n"
-            "Existing text:\n" + continue_text + "\n\nResume now:\n"
-        )
+        user_content = "Continue the following consultation exactly where it stopped.\n\n" + continue_text + "\n\nResume now:\n"
     else:
         user_content = (
             f"Client name: {name or 'N/A'}.\n"
             f"Year Branch (zodiac hint): {year_branch_cn or 'unknown'}.\n"
-            "Produce sections (bold headings) in this order: Personality Snapshot; Marriage & Compatibility; Career & Wealth; Health; "
-            "Luck Cycles (1–5 years, 5–10 years, with months if possible); Remedies & Feng Shui; Final Strategy.\n\n"
+            "Use Markdown with **bold** section titles and bullet points.\n\n"
             "Chart JSON:\n" + json.dumps(chart, ensure_ascii=False)
         )
-
     gen = ai_stream([system_prompt, {"role":"user","content": user_content}])
     return Response(stream_with_context(gen), mimetype="text/event-stream",
                     headers={"Cache-Control":"no-cache, no-transform", "X-Accel-Buffering":"no", "Connection":"keep-alive"})
