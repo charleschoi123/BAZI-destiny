@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BAZI Destiny</title>
+  <link rel="icon" href="/logo.svg" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/logo.svg" alt="Bagua" />
+      <span>BAZI Destiny</span>
+    </div>
+    <div class="actions">
+      <button id="btnExport" class="ghost">Export PDF</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>Enter Your Birth Details</h2>
+      <p class="muted">We convert your local birth time to Beijing Time (UTC+8) automatically for accurate BaZi (Four Pillars) calculation.</p>
+
+      <form id="form">
+        <div class="grid">
+          <div class="field">
+            <label>Name (optional)</label>
+            <input type="text" id="name" placeholder="Your name" />
+          </div>
+          <div class="field">
+            <label>Gender (optional)</label>
+            <select id="gender">
+              <option value="">Prefer not to say</option>
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Date (YYYY-MM-DD)</label>
+            <input type="date" id="date" />
+          </div>
+          <div class="field">
+            <label>Time (24h HH:MM)</label>
+            <input type="time" id="time" />
+          </div>
+
+          <div class="field">
+            <label>City</label>
+            <input type="text" id="city" placeholder="e.g., Guangzhou" />
+          </div>
+          <div class="field">
+            <label>Country</label>
+            <input type="text" id="country" placeholder="e.g., China" />
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="primary" id="btnGo">Generate & Stream Interpretation</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="toolbar card" id="aiCtl" style="display:none;">
+      <div class="left">
+        <strong>Your Personalized BaZi Reading</strong>
+      </div>
+      <div class="right">
+        <button id="btnCont" class="primary" type="button">Continue</button>
+      </div>
+    </section>
+
+    <section id="results"></section>
+
+    <section class="card" id="aiCard" style="display:none;">
+      <h3>Reading (streaming)</h3>
+      <div id="aiBox" class="ai-box"></div>
+    </section>
+
+    <section class="card error" id="errBox" style="display:none;"></section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
