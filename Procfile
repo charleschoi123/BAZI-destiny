@@ -1,1 +1,1 @@
-web: gunicorn app:app --workers 1 --threads 2 --timeout 600 --graceful-timeout 600 --keep-alive 90
+web: gunicorn app:app -k sync --workers 1 --threads 8 --timeout 180 --keep-alive 5
