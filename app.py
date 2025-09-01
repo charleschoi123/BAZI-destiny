@@ -1,276 +1,294 @@
-import os, json, math, queue, threading, time
+import os, json, queue, threading, time
 from datetime import datetime
-from typing import Dict, List
-
 from flask import Flask, render_template, request, Response, jsonify
+import requests
 from timezonefinder import TimezoneFinder
 import pytz
-import requests
 from lunar_python import Solar
 
-app = Flask(__name__)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
-# ---------- Config ----------
-AI_BASE_URL  = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-AI_MODEL     = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-AI_API_KEY   = os.environ.get("DEEPSEEK_API_KEY", "")
-REQUEST_TIMEOUT = (10, 600)   # (connect, read)
+app = Flask(__name__, static_url_path="/static", static_folder="static", template_folder="templates")
 
+# ---------------- Utils: time zone -> Beijing (UTC+8) ----------------
 tf = TimezoneFinder()
 
-# ---------- Utils ----------
-def local_to_beijing(date_str: str, time_str: str, city: str, country: str):
+def to_beijing_dt(city: str, country: str, date_str: str, time_str: str):
     """
-    Convert local birth time (provided by user as local civil time) to Beijing time (UTC+8)
-    using a best-effort timezone guess from city/country text.
-    For free-text city names we cannot geocode here; we assume the user time is local time
-    and we only normalize to Asia/Shanghai by offset math using named tz if we can guess.
-    Minimal, robust path: try tz by country→fallback to UTC (user-entered local).
+    city, country: plain strings typed by user
+    date_str: 'YYYY/MM/DD' | 'YYYY-MM-DD'
+    time_str: 'HH:MM' 24h
+    return: aware datetime in BJ (UTC+8) + sanitized original tz name
     """
-    # Minimal map for common countries/cities → tz name (can expand over time)
-    simple_tz_map = {
-        "china": "Asia/Shanghai",
-        "hong kong": "Asia/Hong_Kong",
-        "taiwan": "Asia/Taipei",
-        "singapore": "Asia/Singapore",
-        "malaysia": "Asia/Kuala_Lumpur",
-        "japan": "Asia/Tokyo",
-        "korea": "Asia/Seoul",
-        "south korea": "Asia/Seoul",
-        "usa": "America/New_York",   # fallback; later user can specify accurate
-        "united states": "America/New_York",
-        "uk": "Europe/London",
-        "united kingdom": "Europe/London",
-        "canada": "America/Toronto",
-        "australia": "Australia/Sydney",
-        "germany": "Europe/Berlin",
-        "france": "Europe/Paris",
-        "italy": "Europe/Rome",
-        "spain": "Europe/Madrid",
-        "india": "Asia/Kolkata",
-    }
-
-    key = (country or "").strip().lower()
-    tzname = simple_tz_map.get(key)
-    if not tzname:
-        # try by city
-        key2 = (city or "").strip().lower()
-        tzname = simple_tz_map.get(key2, "UTC")
-
-    # Parse local datetime
-    dt_local = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    # naive fallback: use country/city guess with pytz common names
+    # We try: (city, country) -> tz by TimezoneFinder with simple map (NOT using coordinates)
+    # Since user只填城市/国家，这里采用“国家级兜底 + 北京换算”
     try:
-        tz_local = pytz.timezone(tzname)
+        dt_local = datetime.strptime(date_str.replace("年","/").replace("月","/").replace("日","/").replace("-", "/"), "%Y/%m/%d")
+    except:
+        dt_local = datetime.utcnow()
+    try:
+        hh, mm = time_str.split(":")
+        dt_local = dt_local.replace(hour=int(hh), minute=int(mm))
+    except:
+        pass
+
+    # 兜底：用国家常见时区
+    country_up = (country or "").strip().upper()
+    common = {
+        "CHINA":"Asia/Shanghai", "CN":"Asia/Shanghai",
+        "USA":"America/New_York", "US":"America/New_York",
+        "UNITED STATES":"America/New_York",
+        "UK":"Europe/London", "UNITED KINGDOM":"Europe/London",
+        "HONG KONG":"Asia/Hong_Kong", "HK":"Asia/Hong_Kong",
+        "TAIWAN":"Asia/Taipei", "TW":"Asia/Taipei",
+        "SINGAPORE":"Asia/Singapore", "SG":"Asia/Singapore",
+        "MALAYSIA":"Asia/Kuala_Lumpur", "MY":"Asia/Kuala_Lumpur",
+        "JAPAN":"Asia/Tokyo", "JP":"Asia/Tokyo",
+        "KOREA":"Asia/Seoul", "SOUTH KOREA":"Asia/Seoul", "KR":"Asia/Seoul",
+        "AUSTRALIA":"Australia/Sydney", "AU":"Australia/Sydney",
+        "CANADA":"America/Toronto", "CA":"America/Toronto",
+        "GERMANY":"Europe/Berlin", "DE":"Europe/Berlin",
+        "FRANCE":"Europe/Paris", "FR":"Europe/Paris",
+        "INDIA":"Asia/Kolkata", "IN":"Asia/Kolkata"
+    }
+    tzname = common.get(country_up, "UTC")
+    try:
+        tz = pytz.timezone(tzname)
+        local_aware = tz.localize(dt_local)
     except Exception:
-        tz_local = pytz.UTC
+        local_aware = pytz.UTC.localize(dt_local)
 
-    aware_local = tz_local.localize(dt_local, is_dst=None)
-    # Convert to Beijing
-    beijing_tz = pytz.timezone("Asia/Shanghai")
-    beijing_dt = aware_local.astimezone(beijing_tz)
-    return beijing_dt
+    bj = pytz.timezone("Asia/Shanghai")
+    bj_dt = local_aware.astimezone(bj)
+    return bj_dt, tzname
 
-def sexagenary_from_solar(dt_beijing: datetime):
-    """
-    Use lunar-python to get stems/branches for year/month/day/hour
-    """
-    solar = Solar.fromYmdHms(dt_beijing.year, dt_beijing.month, dt_beijing.day,
-                             dt_beijing.hour, dt_beijing.minute, dt_beijing.second)
+# ---------------- BaZi core (year/month/day/hour pillars & helpers) ----------------
+
+HEAVENLY_STEMS = ["Jia", "Yi", "Bing", "Ding", "Wu", "Ji", "Geng", "Xin", "Ren", "Gui"]
+EARTHLY_BRANCHES = ["Zi", "Chou", "Yin", "Mao", "Chen", "Si", "Wu", "Wei", "Shen", "You", "Xu", "Hai"]
+FIVE_ELEMENTS = ["Wood", "Fire", "Earth", "Metal", "Water"]
+
+def solar_to_bazi(y, m, d, hh):
+    """Using lunar-python to get GanZhi; hour pillar computed by standard rule."""
+    solar = Solar.fromYmdHms(y, m, d, hh, 0, 0)
     lunar = solar.getLunar()
-
     y_gz = lunar.getYearInGanZhi()
     m_gz = lunar.getMonthInGanZhi()
     d_gz = lunar.getDayInGanZhi()
-    h_gz = lunar.getTimeZhi()  # 地支（时支）
-    h_gan = lunar.getTimeGan() # 天干（时干）
-    h_gz_full = f"{h_gan}{h_gz}"
+    h_gz = lunar.getTimeInGanZhi()
+    # Convert to english-friendly with both Han chars and pinyin-ish
+    def split_gz(gz):
+        # gz like 甲子
+        if len(gz) == 2:
+            return gz[0], gz[1]
+        return gz[0], gz[-1]
+    def map_stem(ch):
+        idx = "甲乙丙丁戊己庚辛壬癸".find(ch)
+        return HEAVENLY_STEMS[idx] if idx>=0 else ch
+    def map_branch(ch):
+        idx = "子丑寅卯辰巳午未申酉戌亥".find(ch)
+        return EARTHLY_BRANCHES[idx] if idx>=0 else ch
 
-    # year branch for compatibility
-    y_branch = lunar.getYearZhi()
+    def to_obj(gz):
+        s, b = split_gz(gz)
+        return {"stem": map_stem(s), "branch": map_branch(b), "han": gz}
 
-    # quick five-element counts (very simplified)
-    # Map 天干地支 → 五行
-    wuxing_map = {
-        '甲':'Wood','乙':'Wood','寅':'Wood','卯':'Wood',
-        '丙':'Fire','丁':'Fire','巳':'Fire','午':'Fire',
-        '戊':'Earth','己':'Earth','辰':'Earth','丑':'Earth','未':'Earth','戌':'Earth',
-        '庚':'Metal','辛':'Metal','申':'Metal','酉':'Metal',
-        '壬':'Water','癸':'Water','子':'Water','亥':'Water'
-    }
-
-    all_parts = ''.join([y_gz, m_gz, d_gz, h_gz_full])
-    counts = {'Wood':0,'Fire':0,'Earth':0,'Metal':0,'Water':0}
-    for ch in all_parts:
-        if ch in wuxing_map:
-            counts[wuxing_map[ch]] += 1
-    dom = max(counts, key=counts.get)
-
-    ten_gods_note = "Traditional roles explained in simple English."
     return {
-        "year_gz": y_gz,
-        "month_gz": m_gz,
-        "day_gz": d_gz,
-        "hour_gz": h_gz_full,
-        "year_branch": y_branch,
-        "five": counts,
-        "dominant": dom,
-        "ten_gods_note": ten_gods_note
+        "year": to_obj(y_gz),
+        "month": to_obj(m_gz),
+        "day": to_obj(d_gz),
+        "hour": to_obj(h_gz)
     }
 
-def build_ai_prompt(chart: Dict, name: str):
-    name = name.strip() if name else "the client"
-    y, m, d, h = chart['year_gz'], chart['month_gz'], chart['day_gz'], chart['hour_gz']
-    dom = chart['dominant']
-    five = chart['five']
-    yb = chart['year_branch']
+def element_from_stem(stem_en):
+    # very common mapping
+    table = {
+        "Jia":"Wood", "Yi":"Wood",
+        "Bing":"Fire", "Ding":"Fire",
+        "Wu":"Earth", "Ji":"Earth",
+        "Geng":"Metal", "Xin":"Metal",
+        "Ren":"Water", "Gui":"Water"
+    }
+    return table.get(stem_en, "Earth")
 
-    five_str = ", ".join([f"{k}: {v}" for k,v in five.items()])
-    sys = (
-        "You are a culturally respectful, plain-English BaZi (Four Pillars) consultant for non-Chinese users. "
-        "Explain traditional terms with short glossaries. Be kind, direct, and specific. "
-        "Structure output with markdown headings (###) for sections like Personality, Career, Relationships, Health, Wealth, "
-        "Marriage & Compatibility, Remedies & Feng Shui, Prioritized Action Checklist, and Luck & Forecast (month-by-month for next 12 months, yearly for 5–10 years). "
-        "Avoid any mention of AI or model names."
-    )
-    usr = f"""
-Client name: {name}
-Year Pillar: {y}
-Month Pillar: {m}
-Day Pillar: {d}
-Hour Pillar: {h}
-Year Branch (zodiac): {yb}
+def five_element_distribution(pillars):
+    counts = {e:0 for e in FIVE_ELEMENTS}
+    for p in ["year","month","day","hour"]:
+        e = element_from_stem(pillars[p]["stem"])
+        counts[e]+=1
+    dom = max(counts, key=lambda k:counts[k])
+    return counts, dom
 
-Five-element counts: {five_str}. Dominant element: {dom}.
+# ---------------- Prompt builder ----------------
 
-Please provide:
-1) Brief personality based on Day Master & element balance.
-2) Career recommendations (industries, roles) and do/don’t.
-3) Marriage/compatibility: most harmonious zodiacs, challenging matches, and why (simple terms).
-4) Health tips mapped to elements (digestive, respiratory etc. where relevant).
-5) Wealth approach (investing style, timing, risk level).
-6) Remedies & Feng Shui: colors, materials, directions, habits; practical and safe.
-7) Action checklist (1–2 years) with bullet priorities.
-8) Luck & Forecast: next 12 months with monthly highlights; 1–5 years and 5–10 years by year themes.
+SYSTEM_PROMPT = (
+"You're an expert Bazi (Four Pillars of Destiny) consultant for non-Chinese users. "
+"Explain in friendly, plain English, but keep accurate Chinese terms with pinyin/hanzi in parentheses when useful. "
+"Be specific and practical. Avoid mystical exaggeration. Keep a respectful tone.\n"
+)
 
-Use clear English. Use ### headings for each major section. Do NOT include a closing line like “Would you like to explore…”.
-"""
-    return [{"role":"system","content":sys},{"role":"user","content":usr}]
+def build_user_prompt(name, gender, bj_dt, city, country, pillars, elem_counts, dominant):
+    # build a highly structured prompt to force detailed sections
+    lines = []
+    lines.append(f"Client: {name or 'Guest'}; Gender: {gender or 'unspecified'}; "
+                 f"Birth converted to Beijing time (UTC+8): {bj_dt.strftime('%Y-%m-%d %H:%M')} "
+                 f"(from {city}, {country}).")
+    lines.append(f"Pillars (GanZhi): "
+                 f"Year {pillars['year']['han']} ({pillars['year']['stem']} {pillars['year']['branch']}), "
+                 f"Month {pillars['month']['han']}, Day {pillars['day']['han']}, Hour {pillars['hour']['han']}.")
+    lines.append(f"Five Elements count: {elem_counts}. Dominant element: {dominant}.")
+    lines.append("\nPlease produce a comprehensive, *actionable* reading with H3 headings, exactly in this order:")
+    lines.append("### Marriage & Compatibility")
+    lines.append("- Give 3-5 **most harmonious** zodiac partners (by Year Branch) and short reasons.")
+    lines.append("- Give 2-3 **challenging** matches and why; include practical tips to handle them.")
+    lines.append("- One-sentence dynamics summary.")
+    lines.append("### Career")
+    lines.append("- 4–8 concrete career directions, industries, or role styles that fit the chart.")
+    lines.append("- How to lead/collaborate; decision style; growth strategy.")
+    lines.append("### Health")
+    lines.append("- Organs/systems to watch based on elements; typical symptoms; daily habits.")
+    lines.append("- Seasonal focus (Spring/Wood, Summer/Fire, etc.).")
+    lines.append("### Wealth")
+    lines.append("- Short-term vs long-term money strategy; investing style; risk notes.")
+    lines.append("- Side-hustle or asset suggestions tied to elements.")
+    lines.append("### Luck Cycles (DaYun & Next 1–10 Years)")
+    lines.append("- Describe overall 10-year trend patterns (even if simplified).")
+    lines.append("- Give **Year-by-year** highlights for the next 5 years; where possible, add **month windows** (approx).")
+    lines.append("### Remedies & Feng Shui")
+    lines.append("- Colors, materials, directions, numbers, and simple daily habits to balance the elements.")
+    lines.append("- Specific desk/bed orientation or home layout tweaks.")
+    lines.append("### Action Plan")
+    lines.append("- A numbered checklist (6–10 items) the client can start this month.")
+    lines.append("- Close with one encouraging line (no promises, no fortune-telling language).")
+    return "\n".join(lines)
 
-# ---------- SSE reader ----------
-def _reader_thread(q: "queue.Queue[str]", url: str, headers: Dict, payload: Dict):
-    try:
-        with requests.post(url, headers=headers, json=payload, stream=True, timeout=REQUEST_TIMEOUT) as r:
-            for raw_line in r.iter_lines(decode_unicode=True):
-                if raw_line is None:
-                    continue
-                line = raw_line.strip()
-                if not line:
-                    continue
-                if line.startswith("data:"):
-                    data = line[5:].strip()
-                    # normalize to OpenAI-style stream objects
-                    q.put(f"data: {data}")
-                    if data == "[DONE]":
-                        break
-    except Exception as e:
-        q.put(f"::ERR::{e}")
-    finally:
-        q.put("::DONE::")
+# ---------------- DeepSeek Streaming ----------------
 
-def ai_stream(messages: List[Dict[str,str]]):
-    if not AI_API_KEY:
-        yield "data: " + json.dumps({"delta":"[Server note] Missing DEEPSEEK_API_KEY.\n"}) + "\n\n"
-        yield "data: [DONE]\n\n"; return
+def deepseek_stream(messages, temperature=0.7, max_tokens=1200):
+    """
+    Stream text via DeepSeek compatibility (OpenAI-like).
+    Fallback to chunk yielding for robustness.
+    """
+    if not DEEPSEEK_API_KEY:
+        yield "ERROR: Missing DEEPSEEK_API_KEY.\n"
+        return
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True
+    }
 
-    url = f"{AI_BASE_URL.rstrip('/')}/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": AI_MODEL, "messages": messages, "temperature": 0.8, "stream": True}
-
-    q: "queue.Queue[str]" = queue.Queue(maxsize=1000)
-    t = threading.Thread(target=_reader_thread, args=(q, url, headers, payload), daemon=True)
-    t.start()
-
-    idle = 0
-    while True:
-        try:
-            item = q.get(timeout=1.0)   # 1s 更积极的心跳窗口
-            idle = 0
-            if item == "::DONE::":
-                yield "data: [DONE]\n\n"
+    with requests.post(url, headers=headers, data=json.dumps(payload), stream=True, timeout=(10, 600)) as r:
+        r.raise_for_status()
+        for raw in r.iter_lines(decode_unicode=True):
+            # keep alive
+            if not raw:
+                yield ""
+                continue
+            if raw.startswith("data: "):
+                data = raw[6:]
+            else:
+                data = raw
+            if data == "[DONE]":
                 break
-            if item.startswith("::ERR::"):
-                yield "data: " + json.dumps({"delta": f"\n\n[connection note] {item[7:]}\n"}) + "\n\n"
-                yield "data: [DONE]\n\n"
-                break
-            if item.startswith("data: "):
-                data = item[6:]
-                if data == "[DONE]":
-                    yield "data: [DONE]\n\n"
-                    break
-                # 尝试解析 OpenAI/DeepSeek 流对象
-                try:
-                    obj = json.loads(data)
-                    delta = obj.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    if delta:
-                        yield "data: " + json.dumps({"delta": delta}) + "\n\n"
-                except Exception:
-                    # 已经是纯文本
-                    yield "data: " + json.dumps({"delta": data}) + "\n\n"
-        except queue.Empty:
-            idle += 1
-            # 定时心跳，保持连接
-            yield ": ping\n\n"
-            if idle % 5 == 0:
-                yield "data: " + json.dumps({"delta": ""}) + "\n\n"
+            try:
+                obj = json.loads(data)
+                delta = obj["choices"][0]["delta"].get("content", "")
+                if delta:
+                    yield delta
+            except Exception:
+                # try best effort
+                pass
 
-# ---------- Routes ----------
+# ---------------- Routes ----------------
+
 @app.route("/")
 def index():
     return render_template("index.html")
 
-@app.route("/api/chart", methods=["POST"])
+@app.post("/api/chart")
 def api_chart():
     data = request.get_json(force=True)
-    name    = (data.get("name") or "").strip()
-    gender  = (data.get("gender") or "").strip()
-    date    = data.get("date")    # YYYY-MM-DD
-    time_s  = data.get("time")    # HH:MM
-    city    = (data.get("city") or "").strip()
+    name = (data.get("name") or "").strip()
+    gender = data.get("gender") or ""
+    date = data.get("date") or ""
+    time_ = data.get("time") or ""
+    city = (data.get("city") or "").strip()
     country = (data.get("country") or "").strip()
 
-    try:
-        bj = local_to_beijing(date, time_s, city, country)
-        chart = sexagenary_from_solar(bj)
-        out = {
-            "beijing": bj.strftime("%Y-%m-%d %H:%M"),
-            "name": name,
-            "gender": gender,
-            "city": city,
-            "country": country,
-            "chart": chart
-        }
-        return jsonify({"ok": True, "data": out})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+    bj_dt, tzname = to_beijing_dt(city, country, date, time_)
+    pillars = solar_to_bazi(bj_dt.year, bj_dt.month, bj_dt.day, bj_dt.hour)
+    elem_counts, dominant = five_element_distribution(pillars)
 
-@app.route("/api/interpret_stream", methods=["POST"])
+    # simple five-element bar for front-end
+    resp = {
+        "bj_time": bj_dt.strftime("%Y-%m-%d %H:%M"),
+        "src_tz": tzname,
+        "pillars": pillars,
+        "elements": elem_counts,
+        "dominant": dominant
+    }
+    return jsonify(resp)
+
+@app.post("/api/interpret_stream")
 def api_interpret_stream():
+    """
+    SSE-like: stream purely text; front端累积渲染，并按 H3 自动拆卡。
+    支持 continue_text：补写不会清空旧内容。
+    """
     data = request.get_json(force=True)
-    name  = data.get("name") or ""
-    chart = data.get("chart")
-    cont  = data.get("continue_text") or ""
+    name = data.get("name")
+    gender = data.get("gender")
+    date = data.get("date")
+    time_ = data.get("time")
+    city = data.get("city")
+    country = data.get("country")
+    bj = data.get("bj_time")
+    pillars = data.get("pillars")
+    elements = data.get("elements")
+    dominant = data.get("dominant")
+    continue_text = data.get("continue_text") or ""
 
-    if cont:
-        messages = [{"role":"system","content":"Continue the previous BaZi reading. Keep the same tone and structure. Do not repeat headings already fully covered."},
-                    {"role":"user","content":cont}]
-    else:
-        messages = build_ai_prompt(chart, name)
+    try:
+        bj_dt = datetime.strptime(bj, "%Y-%m-%d %H:%M")
+    except:
+        bj_dt = datetime.utcnow()
 
-    def gen():
-        for chunk in ai_stream(messages):
-            yield chunk
-    return Response(gen(), mimetype="text/event-stream")
+    sys = {"role":"system","content":SYSTEM_PROMPT}
+    user = {"role":"user","content":build_user_prompt(name, gender, bj_dt, city, country, pillars, elements, dominant)}
+    msgs = [sys, user]
+    if continue_text:
+        msgs.append({"role":"user","content":f"Continue expanding the reading from here, without repeating earlier text:\n{continue_text}"})
+
+    def generate():
+        # keep-alive ping避免 Gunicorn 超时
+        last = time.time()
+        for chunk in deepseek_stream(msgs):
+            now = time.time()
+            if chunk:
+                yield chunk
+                last = now
+            elif now - last > 2:
+                # 保持连接
+                yield " "
+                last = now
+        # 结束换行
+        yield "\n"
+
+    return Response(generate(), mimetype="text/plain; charset=utf-8")
+
+# health
+@app.get("/healthz")
+def healthz():
+    return "ok", 200
 
 if __name__ == "__main__":
-    # 本地调试用，Render 会用 gunicorn 启动
-    app.run(host="0.0.0.0", port=10000, debug=False)
+    app.run(host="0.0.0.0", port=10000, debug=True)
