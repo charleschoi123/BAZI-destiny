@@ -1,16 +1,16 @@
 from __future__ import annotations
-import os, json, requests, time, threading, queue
+import os, json, requests, threading, queue
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List, Optional
 from flask import Flask, request, jsonify, Response, stream_with_context
 from timezonefinder import TimezoneFinder
 import pytz
 
 # ===== Branding =====
-APP_NAME = "BAZI Destiny"
-APP_TAGLINE = "Ancient Eastern wisdom—clear, practical guidance for modern life."
+APP_NAME   = "BAZI Destiny"
+APP_TAGLINE= "Ancient Eastern wisdom—clear, practical guidance for modern life."
 
-# OpenAI-compatible endpoint (DeepSeek or other)
+# ===== LLM (DeepSeek/OpenAI 兼容) =====
 AI_BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
 AI_API_KEY  = os.getenv("DEEPSEEK_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
 AI_MODEL    = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -93,7 +93,7 @@ def tz_name_from_latlon(lat: float, lon: float) -> Optional[str]:
     except Exception:
         return None
 
-# ===== Assets (logo + styles + JS; 4 themes + PPT-like deck) =====
+# ===== Front-end assets (SVG/CSS/JS) =====
 LOGO_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>
 <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#c9a86a'/><stop offset='1' stop-color='#7a5a2e'/></linearGradient></defs>
 <circle cx='80' cy='80' r='76' fill='#0f0f0f' stroke='url(#g)' stroke-width='4'/>
@@ -107,13 +107,16 @@ LOGO_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'>
 </svg>"""
 
 STYLES_CSS = """
+/* Google font（失败也会回退系统字体） */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+
 *{box-sizing:border-box}
 :root{ --bg:#0f0e0b; --paper:#f8f6f1; --ink:#1d1a16; --accent:#c9a86a; --accent2:#7a5a2e }
 .theme-jade   { --accent:#6bb58b; --accent2:#2f6d55 }
 .theme-crimson{ --accent:#d96363; --accent2:#7a2e2e }
 .theme-ink    { --paper:#f9f9f7; --ink:#111; --accent:#444; --accent2:#222 }
 
-body{margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
 header{background:linear-gradient(180deg,#171512,#0f0e0b);border-bottom:1px solid #1c1a17;color:#fff}
 .container{max-width:1040px;margin:0 auto;padding:20px}
 .brand{display:flex;gap:14px;align-items:center}
@@ -144,8 +147,8 @@ hr.sep{border:none;border-top:1px dashed #d9cdb5;margin:14px 0}
 .toolbar{display:flex;justify-content:space-between;align-items:center;margin:10px 0;gap:10px}
 .toolbar .left,.toolbar .right{display:flex;align-items:center;gap:8px}
 .dots{display:flex;gap:6px}
-.dots .dot{width:10px;height:10px;border-radius:999px;background:#d1c6ad;opacity:.6;transition:.2s}
-.dots .dot.active{opacity:1;background:var(--accent);box-shadow:0 0 0 2px rgba(0,0,0,.08)}
+.dot{width:10px;height:10px;border-radius:999px;background:#d1c6ad;opacity:.6;transition:.2s}
+.dot.active{opacity:1;background:var(--accent);box-shadow:0 0 0 2px rgba(0,0,0,.08)}
 
 /* Deck & Slides */
 .deck{position:relative;min-height:60vh}
@@ -161,6 +164,14 @@ hr.sep{border:none;border-top:1px dashed #d9cdb5;margin:14px 0}
 .slide-head svg{width:26px;height:26px}
 .slide-title{font-size:1.4rem;font-weight:800;margin:0}
 .slide-body{line-height:1.65}
+
+/* Pretty tables/rows */
+.table{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.cell{border:1px solid #eadfc9;border-radius:10px;padding:8px;background:#fff}
+.cell.good{border-color:#76c29d;background:#f2fbf6}
+.cell.bad{border-color:#e59a9a;background:#fff6f6}
+.timeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.ti{background:#fff;border:1px solid #eadfc9;border-radius:10px;padding:8px}
 
 /* Print for A4 */
 @media print{
@@ -184,7 +195,7 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
 <main class='container'>
   <div class='card'>
     <h2>Enter Your Birth Details</h2>
-    <p style='margin:.4rem 0 .8rem;color:#5a513f'>We convert your local birth time to Beijing Time (UTC+8) automatically for accurate Bazi (Four Pillars) calculation.</p>
+    <p style='margin:.4rem 0 .8rem;color:#5a513f'>We convert your local birth time to Beijing Time (UTC+8) automatically for accurate Bazi calculation.</p>
     <form id='baziForm' class='no-print'>
       <div class='grid2'>
         <label>Name (optional) <input type='text' id='name' placeholder='Your name'/></label>
@@ -197,12 +208,10 @@ INDEX_HTML = f"""<!doctype html><html lang='en'><head>
         <label>Time (24h HH:MM) <input required type='time' id='time'/></label>
       </div>
       <div class='grid2'>
-        <label>City <input required type='text' id='city' placeholder='e.g., New York'/></label>
-        <label>Country <input required type='text' id='country' placeholder='e.g., United States'/></label>
+        <label>City <input required type='text' id='city' placeholder='e.g., Guangzhou'/></label>
+        <label>Country <input required type='text' id='country' placeholder='e.g., China'/></label>
       </div>
-      <div class='section'>
-        <button class='primary' type='submit'>Generate & Stream Interpretation</button>
-      </div>
+      <div class='section'><button class='primary' type='submit'>Generate & Stream Interpretation</button></div>
     </form>
   </div>
 
@@ -238,10 +247,10 @@ const ICONS = {
   gods:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 12h16M12 4v16"/></svg>`,
   elements:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2l9 7-9 13L3 9z"/></svg>`,
   dayun:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 12h18M3 6h12M3 18h8"/></svg>`,
+  love:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 21s-7-4.5-9-9 1-8 5-8 4 3 4 3 1-3 5-3 7 3 5 8-10 9-10 9z"/></svg>`,
   ai:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>`
 };
 
-// ---- Theme switch ----
 function applyTheme(val){
   document.documentElement.classList.remove('theme-jade','theme-crimson','theme-ink');
   if(val==='jade') document.documentElement.classList.add('theme-jade');
@@ -249,7 +258,6 @@ function applyTheme(val){
   if(val==='ink') document.documentElement.classList.add('theme-ink');
 }
 
-// ---- Deck helpers ----
 function makeSlide({icon,title,html}){
   return `<section class="slide-page"><div class="slide-head">
     <div class="icon">${ICONS[icon]||''}</div><h2 class="slide-title">${title}</h2></div>
@@ -278,7 +286,28 @@ document.addEventListener('keydown',e=>{
   if(e.key==='ArrowLeft')  nav(-1);
 });
 
-// ---- Build deck from chart data ----
+function bar(label,val,sum){
+  const pct=Math.round(100*(val||0)/(sum||1));
+  return `<div style="margin:6px 0">${label}: ${val||0}
+    <div style="height:8px;background:#eee;border-radius:6px;overflow:hidden">
+      <div style="width:${pct}%;height:8px;background:var(--accent)"></div></div></div>`;
+}
+
+// 生肖配对卡片（按年支）
+function zodiMatch(year_branch){
+  const map = {
+    "巳":{ best:["酉( Rooster )","丑( Ox )"], work:["辰( Dragon )","申( Monkey )"], hard:["亥( Pig )","寅( Tiger )"] },
+    // 其他生肖可以继续补，这里演示 Snake
+  };
+  const m = map[year_branch] || {best:[],work:[],hard:[]};
+  return `
+    <div class="table">
+      <div class="cell good"><b>Most harmonious</b><div>${m.best.join(", ")||"—"}</div></div>
+      <div class="cell"><b>Can work</b><div>${m.work.join(", ")||"—"}</div></div>
+      <div class="cell bad"><b>Challenging</b><div>${m.hard.join(", ")||"—"}</div></div>
+    </div>`;
+}
+
 function renderSlidesDeck(data){
   const deck=document.getElementById('deck');
   const p=data.pillars||[], fe=data.five_elements||{}, luck=data.luck_cycles||[];
@@ -289,30 +318,34 @@ function renderSlidesDeck(data){
     <div>Detected time zone: <span class='badge mono'>${data.input.timezone}</span></div>
     <div class='mono'>Local birth time: ${data.input.local_iso}</div>
     <div class='mono'>Beijing time (UTC+8): ${data.input.beijing_iso}</div>`;
-  const pillars = p.map(x=>`<div><strong>${x.pillar}:</strong> ${x.gz} — ${x.stem_el}/${x.branch_el}</div>`).join('');
+  const pillars = p.map(x=>`<div class='pill'><b>${x.pillar}</b> ${x.gz} — ${x.stem_el}/${x.branch_el}</div>`).join('');
   const tg=data.ten_gods||{};
   const tgBlock = `
     <div class='badge'>Month: ${tg.MonthStem||'-'}</div>
     <div class='badge'>Year: ${tg.YearStem||'-'}</div>
     <div class='badge'>Hour: ${tg.HourStem||'-'}</div>`;
   const totalEl=Object.values(fe).reduce((a,b)=>a+b,0)||1;
-  function bar(label,val){const pct=Math.round(100*val/totalEl);
-    return `<div style="margin:6px 0">${label}: ${val}
-    <div style="height:8px;background:#eee;border-radius:6px;overflow:hidden">
-      <div style="width:${pct}%;height:8px;background:var(--accent)"></div></div></div>`;}
   const feBlock = `
-    ${bar('Wood',fe.Wood||0)}${bar('Fire',fe.Fire||0)}${bar('Earth',fe.Earth||0)}
-    ${bar('Metal',fe.Metal||0)}${bar('Water',fe.Water||0)}
+    ${bar('Wood',fe.Wood,totalEl)}${bar('Fire',fe.Fire,totalEl)}${bar('Earth',fe.Earth,totalEl)}
+    ${bar('Metal',fe.Metal,totalEl)}${bar('Water',fe.Water,totalEl)}
     <div class='badge'>Dominant: <strong>${data.main_element||'-'}</strong></div>`;
-  const luckBlock = luck.length?luck.map(x=>`<div>Decade #${x.index} → start ≈ age ${x.start_age}, pillar ${x.gz}</div>`).join(''):'<div class="badge">DaYun not available.</div>';
+  const luckBlock = `
+    <div class="timeline">
+      ${(luck&&luck.length?luck:[{index:1,start_age:'—',gz:'—'},{index:2,start_age:'—',gz:'—'},{index:3,start_age:'—',gz:'—'}])
+        .map(x=>`<div class="ti"><b>Decade #${x.index}</b><div>start age: ${x.start_age}</div><div>pillar: ${x.gz}</div></div>`).join('')}
+    </div>`;
+
+  // Year Branch for compatibility
+  const yb = (p.find(x=>x.pillar==='Year')||{}).branch_cn || '';
 
   const slidesHTML = [
-    makeSlide({icon:'chart',   title:'Your Bazi Chart',            html:head}),
+    makeSlide({icon:'chart',   title:'Overview',                   html:head}),
     makeSlide({icon:'tz',      title:'Time Zone & Conversion',     html:tz}),
-    makeSlide({icon:'pillars', title:'Four Pillars (Ganzhi)',      html:pillars}),
+    makeSlide({icon:'pillars', title:'Four Pillars (Ganzhi)',      html:`<div>${pillars}</div>`}),
     makeSlide({icon:'gods',    title:'Ten Gods (to Day Stem)',     html:tgBlock}),
     makeSlide({icon:'elements',title:'Five Elements Distribution', html:feBlock}),
     makeSlide({icon:'dayun',   title:'10-Year Luck Cycles (DaYun)',html:luckBlock}),
+    makeSlide({icon:'love',    title:'Marriage & Zodiac Matching', html:zodiMatch(yb)}),
     makeSlide({icon:'ai',      title:'AI Consultation (Streaming)',html:`<div id="aiBox" class="mono" style="white-space:pre-wrap"></div><div id="aiCtl" style="margin-top:8px"></div>`}),
   ].join('');
 
@@ -364,6 +397,7 @@ async function streamAI(chart, name, continue_text, tried){
   if(continue_text){ body.continue_text = continue_text; }
 
   const res=await fetch('/api/interpret_stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if(!res.ok){ box.textContent+='[server busy] Please click Continue.\n'; }
   const reader=res.body.getReader(); const decoder=new TextDecoder('utf-8'); let buffer='';
   while(true){
     const {value,done}=await reader.read(); if(done) break;
@@ -399,7 +433,7 @@ def styles(): return Response(STYLES_CSS, mimetype="text/css")
 def appjs(): return Response(APP_JS, mimetype="application/javascript")
 @app.route("/logo.svg")
 def logo(): return Response(LOGO_SVG, mimetype="image/svg+xml")
-@app.route("/favicon.ico")   # 修复 404，用 SVG 也可以
+@app.route("/favicon.ico")
 def favicon(): return Response(LOGO_SVG, mimetype="image/svg+xml")
 
 # ===== Chart =====
@@ -423,7 +457,6 @@ def api_chart():
         if not geo:
             return jsonify({"ok": False, "error": "Could not locate the city/country. Try adding state/province."}), 400
         lat, lon = geo["lat"], geo["lon"]
-
         tz_name = tz_name_from_latlon(lat, lon)
         if not tz_name:
             return jsonify({"ok": False, "error": "Unable to detect time zone for this location."}), 400
@@ -484,7 +517,7 @@ def api_chart():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Server error: {e}"}), 500
 
-# ===== Threaded SSE relay (prevents gunicorn worker timeout) =====
+# ===== SSE relay with background thread (prevents gunicorn killing request) =====
 def _reader_thread(q: "queue.Queue[str]", url: str, headers: dict, payload: dict):
     try:
         with requests.post(url, headers=headers, json=payload, stream=True, timeout=600) as r:
@@ -509,19 +542,20 @@ def ai_stream(messages: List[Dict[str,str]]):
     t = threading.Thread(target=_reader_thread, args=(q, url, headers, payload), daemon=True)
     t.start()
 
+    # 每 2s 发一次注释 ping，保持连接活跃；同时 gunicorn --timeout 提高到 600
     idle = 0
     while True:
         try:
-            item = q.get(timeout=3.0)  # ping every 3s if idle
+            item = q.get(timeout=2.0)
             idle = 0
             if item == "::DONE::":
                 yield "data: [DONE]\n\n"; break
             if item.startswith("::ERR::"):
                 yield "data: " + json.dumps({"delta": f"\n\n[connection note] {item[7:]}\n"}) + "\n\n"
                 yield "data: [DONE]\n\n"; break
-            line = item
-            if line.startswith("data: "):
-                data = line[6:]
+            # 透传
+            if item.startswith("data: "):
+                data = item[6:]
                 if data == "[DONE]":
                     yield "data: [DONE]\n\n"; break
                 try:
@@ -532,9 +566,9 @@ def ai_stream(messages: List[Dict[str,str]]):
                     yield "data: " + json.dumps({"text": data}) + "\n\n"
         except queue.Empty:
             idle += 1
-            yield ": ping\n\n"
-            if idle % 10 == 0:
-                yield "data: " + json.dumps({"delta": ""}) + "\n\n"
+            yield ": ping\n\n"  # SSE 注释行
+            if idle % 5 == 0:
+                yield "data: " + json.dumps({"delta": ""}) + "\n\n"  # 空 delta，促使 gunicorn flush
 
 @app.route("/api/interpret_stream", methods=["POST"])
 def api_interpret_stream():
@@ -556,7 +590,7 @@ def api_interpret_stream():
             "detailed, actionable advice. Cover: marriage & zodiac compatibility; career & wealth with concrete industries; "
             "forecast for the next 1–5 years and 5–10 years (name specific years/months if suggested); health cautions; "
             "remedies & feng shui (colors, materials, accessories, directions, numbers, habits); and a prioritized action checklist. "
-            "Keep a responsible tone—cultural guidance, not medical/financial advice."
+            "Tone: clear, warm, culturally respectful. This is cultural guidance, not medical or financial advice."
         )
     }
 
